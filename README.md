@@ -2,12 +2,13 @@
 
 Responsive crypto news aggregator with server-side caching and persistence.
 
-It pulls stories from reputable crypto media outlets plus crypto-related social signals from X/Twitter and Farcaster, dedupes them, and stores them in SQLite so repeated page loads do not spam upstream sources.
+It pulls stories from reputable crypto media outlets plus crypto-related social signals from X/Twitter and Farcaster, dedupes them, and stores them in a server-side snapshot cache so repeated page loads do not spam upstream sources.
 
 ## Stack
 
 - Next.js App Router + TypeScript
-- SQLite (`better-sqlite3`) for persistent server-side story storage
+- Local JSON snapshot storage for development
+- Vercel Blob support for durable deployed storage
 - `rss-parser` for news feed ingestion
 - Responsive client dashboard with source-type filtering and manual refresh
 
@@ -35,7 +36,9 @@ Notes:
 
 ## Caching and persistence behavior
 
-- Stories are stored in `data/aggregate.sqlite`.
+- Local development stores stories in `data/stories-cache.json`.
+- Vercel deployments use `BLOB_READ_WRITE_TOKEN` when available for durable shared storage.
+- If deployed on Vercel without Blob configured, the app falls back to `/tmp` so the feed still works, but that cache is not durable across cold starts.
 - `GET /api/stories` returns cached stories.
 - Cache refresh happens only when stale or explicitly forced.
 - Refresh lock prevents duplicate concurrent refresh jobs.
@@ -52,6 +55,7 @@ Optional:
 
 - `REFRESH_TTL_MINUTES` (default: `15`)
 - `MAX_STORY_ROWS` (default: `2500`)
+- `BLOB_READ_WRITE_TOKEN` for durable Vercel storage
 
 ## Run
 
