@@ -15,7 +15,7 @@ import {
 import type { RefreshResult, StoryInput, StoryType } from "@/lib/types";
 
 const REQUEST_TIMEOUT_MS = 18000;
-const DEFAULT_MAX_ROWS = 2500;
+const DEFAULT_MAX_ROWS = 4000;
 const parser = new Parser();
 
 function normalizeText(value: string): string {
@@ -83,8 +83,30 @@ function shorten(text: string, max = 160): string {
   return `${text.slice(0, Math.max(0, max - 1)).trimEnd()}...`;
 }
 
-function parseSocialSnippets(markdown: string, maxItems: number): string[] {
-  const lines = markdown.split("\n");
+function shouldIgnoreSocialLine(line: string): boolean {
+  const lower = line.toLowerCase();
+
+  if (
+    lower === "pinned" ||
+    lower.includes("don\u2019t miss what\u2019s happening") ||
+    lower.includes("don't miss what's happening") ||
+    lower.includes("people on x are the first to know") ||
+    lower.includes("see new posts") ||
+    lower.includes("new to x?") ||
+    lower.includes("this account doesn\u2019t exist") ||
+    lower.includes("this account doesn't exist") ||
+    lower.includes("try searching for another") ||
+    lower.includes("[ad]") ||
+    lower.includes("create account") ||
+    /(?:'s|\u2019s) posts$/i.test(line)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function collectSocialSnippets(lines: string[], maxItems: number): string[] {
   const snippets: string[] = [];
   const seen = new Set<string>();
 
@@ -106,6 +128,10 @@ function parseSocialSnippets(markdown: string, maxItems: number): string[] {
       line.startsWith("!") ||
       line.startsWith(">")
     ) {
+      continue;
+    }
+
+    if (shouldIgnoreSocialLine(line)) {
       continue;
     }
 
@@ -134,6 +160,23 @@ function parseSocialSnippets(markdown: string, maxItems: number): string[] {
   }
 
   return snippets;
+}
+
+function parseSocialSnippets(markdown: string, maxItems: number): string[] {
+  return collectSocialSnippets(markdown.split("\n"), maxItems);
+}
+
+function parseTwitterSnippets(markdown: string, maxItems: number): string[] {
+  const lines = markdown.split("\n");
+  const postsStartIndex = lines.findIndex((line) =>
+    /(?:'s|\u2019s) posts$/i.test(normalizeText(line)),
+  );
+
+  if (postsStartIndex >= 0) {
+    return collectSocialSnippets(lines.slice(postsStartIndex + 1), maxItems);
+  }
+
+  return collectSocialSnippets(lines, maxItems);
 }
 
 function parseTwitterStatusUrls(markdown: string): string[] {
@@ -177,6 +220,24 @@ function parseFarcasterUrls(markdown: string): string[] {
   return urls;
 }
 
+function normalizeStoryUrl(url: string): string {
+  return url.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase();
+}
+
+function dedupeKeyForStory(story: StoryInput): string {
+  const normalizedUrl = normalizeStoryUrl(story.url);
+
+  if (story.sourceType === "news") {
+    return `${story.sourceType}|${normalizedUrl}`;
+  }
+
+  if (/\/status\/\d+$/i.test(normalizedUrl) || /\/casts\//i.test(normalizedUrl) || /\/0x[0-9a-f]+$/i.test(normalizedUrl)) {
+    return `${story.sourceType}|${normalizedUrl}`;
+  }
+
+  return `${story.sourceType}|${story.title.trim().toLowerCase()}`;
+}
+
 function decodeTweetDate(statusUrl: string): string | null {
   const match = statusUrl.match(/status\/(\d+)/);
   if (!match) {
@@ -200,19 +261,29 @@ function decodeTweetDate(statusUrl: string): string | null {
 }
 
 function dedupeStories(stories: StoryInput[]): StoryInput[] {
-  const map = new Map<string, StoryInput>();
-
-  for (const story of stories) {
-    if (!map.has(story.uid)) {
-      map.set(story.uid, story);
-    }
-  }
-
-  return [...map.values()].sort((a, b) => {
+  const orderedStories = [...stories].sort((a, b) => {
     const aTime = new Date(a.publishedAt).getTime();
     const bTime = new Date(b.publishedAt).getTime();
     return bTime - aTime;
   });
+
+  const map = new Map<string, StoryInput>();
+  const seenUids = new Set<string>();
+
+  for (const story of orderedStories) {
+    if (seenUids.has(story.uid)) {
+      continue;
+    }
+
+    seenUids.add(story.uid);
+
+    const dedupeKey = dedupeKeyForStory(story);
+    if (!map.has(dedupeKey)) {
+      map.set(dedupeKey, story);
+    }
+  }
+
+  return [...map.values()];
 }
 
 async function fetchNewsStories(source: NewsFeedSource): Promise<StoryInput[]> {
@@ -258,7 +329,7 @@ async function fetchTwitterStories(source: TwitterSource): Promise<StoryInput[]>
   const profileUrl = `https://x.com/${source.handle}`;
   const markdown = await fetchText(toJinaUrl(profileUrl));
 
-  const snippets = parseSocialSnippets(markdown, source.maxItems);
+  const snippets = parseTwitterSnippets(markdown, source.maxItems);
   const statusUrls = parseTwitterStatusUrls(markdown);
 
   return snippets.map((snippet, index) => {

@@ -24,11 +24,16 @@ It pulls stories from reputable crypto media outlets plus crypto-related social 
 - Bitcoin Magazine
 - Blockworks
 - The Defiant
+- crypto.news
+- Unchained
+- Protos
+- TechCrunch Crypto
+- Financial Times Cryptofinance
 
 ### Social feeds
 
-- X/Twitter profile snapshots for selected crypto accounts
-- Farcaster channel/profile snapshots for crypto-focused streams
+- X/Twitter profile snapshots for selected founders, media brands, and market-watch accounts
+- Farcaster channel/profile snapshots for crypto-focused channels across Ethereum, Bitcoin, Solana, Base, DeFi, and stablecoins
 
 Notes:
 - X/Farcaster ingestion is implemented with a resilient scraping fallback via a text-rendering proxy because most direct APIs now require keys or paid access.
@@ -54,7 +59,7 @@ Notes:
 Optional:
 
 - `REFRESH_TTL_MINUTES` (default: `15`)
-- `MAX_STORY_ROWS` (default: `2500`)
+- `MAX_STORY_ROWS` (default: `4000`)
 - `BLOB_READ_WRITE_TOKEN` for durable Vercel storage
 
 ## Run
