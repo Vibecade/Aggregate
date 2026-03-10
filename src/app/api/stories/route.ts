@@ -29,22 +29,38 @@ function parseLimit(value: string | null): number | undefined {
 }
 
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const shouldForceRefresh = searchParams.get("refresh") === "true";
-  const type = parseType(searchParams.get("type"));
-  const limit = parseLimit(searchParams.get("limit"));
+  try {
+    const { searchParams } = new URL(request.url);
+    const shouldForceRefresh = searchParams.get("refresh") === "true";
+    const type = parseType(searchParams.get("type"));
+    const limit = parseLimit(searchParams.get("limit"));
 
-  if (shouldForceRefresh) {
-    await refreshStories();
-  } else {
-    await ensureFreshStories();
+    if (shouldForceRefresh) {
+      await refreshStories();
+    } else {
+      await ensureFreshStories();
+    }
+
+    const [stories, stats, meta] = await Promise.all([
+      listStories({ limit, type }),
+      getStoryStats(),
+      getCacheMeta(),
+    ]);
+
+    return NextResponse.json({
+      stories,
+      stats,
+      meta,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Feed unavailable";
+
+    return NextResponse.json(
+      {
+        error: "Feed unavailable",
+        message,
+      },
+      { status: 503 },
+    );
   }
-
-  const stories = listStories({ limit, type });
-
-  return NextResponse.json({
-    stories,
-    stats: getStoryStats(),
-    meta: getCacheMeta(),
-  });
 }

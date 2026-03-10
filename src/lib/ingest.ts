@@ -341,10 +341,10 @@ export async function ingestAllSources(): Promise<RefreshResult> {
   );
 
   const dedupedStories = dedupeStories(collected);
-  const inserted = upsertStories(dedupedStories);
+  const inserted = await upsertStories(dedupedStories);
 
   const maxRows = Number(process.env.MAX_STORY_ROWS ?? DEFAULT_MAX_ROWS);
-  pruneStories(Number.isFinite(maxRows) ? maxRows : DEFAULT_MAX_ROWS);
+  await pruneStories(Number.isFinite(maxRows) ? maxRows : DEFAULT_MAX_ROWS);
 
   const byType: Record<StoryType, number> = {
     news: 0,

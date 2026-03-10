@@ -1,119 +1,221 @@
-import Database from "better-sqlite3";
-import fs from "node:fs";
+import { get as getBlob, put as putBlob } from "@vercel/blob";
+import fs from "node:fs/promises";
 import path from "node:path";
 
 import type { StoryInput, StoryListOptions, StoryRecord, StoryStats, StoryType } from "@/lib/types";
 
-const DATA_DIRECTORY = path.join(process.cwd(), "data");
-const DATABASE_PATH = path.join(DATA_DIRECTORY, "aggregate.sqlite");
+type StorageMode = "vercel-blob" | "local-file" | "tmp-file";
 
-const SCHEMA_SQL = `
-  CREATE TABLE IF NOT EXISTS stories (
-    uid TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    url TEXT NOT NULL,
-    source TEXT NOT NULL,
-    source_type TEXT NOT NULL CHECK(source_type IN ('news', 'twitter', 'farcaster')),
-    published_at TEXT NOT NULL,
-    summary TEXT,
-    author TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_stories_published_at ON stories(published_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_stories_source_type ON stories(source_type);
-
-  CREATE TABLE IF NOT EXISTS sync_state (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-  );
-`;
-
-fs.mkdirSync(DATA_DIRECTORY, { recursive: true });
-
-let database: Database.Database | null = null;
-let schemaInitialized = false;
-
-function sleep(milliseconds: number): void {
-  const array = new Int32Array(new SharedArrayBuffer(4));
-  Atomics.wait(array, 0, 0, milliseconds);
+interface Snapshot {
+  version: 1;
+  stories: StoryRecord[];
+  sync: Record<string, string>;
+  updatedAt: string;
 }
 
-function initializeSchema(db: Database.Database): void {
-  if (schemaInitialized) {
+const SNAPSHOT_CACHE_MS = 5_000;
+const SNAPSHOT_PATHNAME = "aggregate/stories-cache.json";
+const LOCAL_DIRECTORY = path.join(process.cwd(), "data");
+const LOCAL_SNAPSHOT_PATH = path.join(LOCAL_DIRECTORY, "stories-cache.json");
+const TMP_SNAPSHOT_PATH = path.join("/tmp", "aggregate", "stories-cache.json");
+
+let snapshotCache: Snapshot | null = null;
+let snapshotCacheLoadedAt = 0;
+let writeQueue: Promise<void> = Promise.resolve();
+
+function isVercelRuntime(): boolean {
+  return process.env.VERCEL === "1" || process.env.VERCEL === "true" || Boolean(process.env.VERCEL_ENV);
+}
+
+function getStorageMode(): StorageMode {
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    return "vercel-blob";
+  }
+
+  if (isVercelRuntime()) {
+    return "tmp-file";
+  }
+
+  return "local-file";
+}
+
+function getFileSnapshotPath(): string {
+  return getStorageMode() === "tmp-file" ? TMP_SNAPSHOT_PATH : LOCAL_SNAPSHOT_PATH;
+}
+
+function createEmptySnapshot(): Snapshot {
+  return {
+    version: 1,
+    stories: [],
+    sync: {},
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function cloneSnapshot(snapshot: Snapshot): Snapshot {
+  return JSON.parse(JSON.stringify(snapshot)) as Snapshot;
+}
+
+function sortStories(stories: StoryRecord[]): StoryRecord[] {
+  return [...stories].sort((left, right) => {
+    const leftTime = new Date(left.publishedAt).getTime();
+    const rightTime = new Date(right.publishedAt).getTime();
+
+    if (leftTime !== rightTime) {
+      return rightTime - leftTime;
+    }
+
+    return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+  });
+}
+
+function normalizeSnapshot(input: unknown): Snapshot {
+  if (!input || typeof input !== "object") {
+    return createEmptySnapshot();
+  }
+
+  const candidate = input as Partial<Snapshot>;
+  const stories = Array.isArray(candidate.stories)
+    ? candidate.stories.filter((story): story is StoryRecord => {
+        return Boolean(
+          story &&
+            typeof story === "object" &&
+            typeof story.uid === "string" &&
+            typeof story.title === "string" &&
+            typeof story.url === "string" &&
+            typeof story.source === "string" &&
+            typeof story.sourceType === "string" &&
+            typeof story.publishedAt === "string" &&
+            typeof story.createdAt === "string" &&
+            typeof story.updatedAt === "string",
+        );
+      })
+    : [];
+
+  return {
+    version: 1,
+    stories: sortStories(stories),
+    sync:
+      candidate.sync && typeof candidate.sync === "object"
+        ? Object.fromEntries(
+            Object.entries(candidate.sync).filter(
+              (entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string",
+            ),
+          )
+        : {},
+    updatedAt:
+      typeof candidate.updatedAt === "string" ? candidate.updatedAt : new Date().toISOString(),
+  };
+}
+
+async function readSnapshotFromBlob(): Promise<Snapshot> {
+  const result = await getBlob(SNAPSHOT_PATHNAME, {
+    access: "public",
+    useCache: false,
+  });
+
+  if (!result?.stream) {
+    return createEmptySnapshot();
+  }
+
+  const text = await new Response(result.stream).text();
+
+  try {
+    return normalizeSnapshot(JSON.parse(text));
+  } catch {
+    return createEmptySnapshot();
+  }
+}
+
+async function writeSnapshotToBlob(snapshot: Snapshot): Promise<void> {
+  await putBlob(SNAPSHOT_PATHNAME, JSON.stringify(snapshot), {
+    access: "public",
+    allowOverwrite: true,
+    addRandomSuffix: false,
+    cacheControlMaxAge: 60,
+    contentType: "application/json",
+  });
+}
+
+async function readSnapshotFromFile(filePath: string): Promise<Snapshot> {
+  try {
+    const text = await fs.readFile(filePath, "utf8");
+    return normalizeSnapshot(JSON.parse(text));
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : null;
+
+    if (code === "ENOENT") {
+      return createEmptySnapshot();
+    }
+
+    throw error;
+  }
+}
+
+async function writeSnapshotToFile(filePath: string, snapshot: Snapshot): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(snapshot), "utf8");
+}
+
+async function readSnapshotFromStorage(): Promise<Snapshot> {
+  const mode = getStorageMode();
+
+  if (mode === "vercel-blob") {
+    return readSnapshotFromBlob();
+  }
+
+  return readSnapshotFromFile(getFileSnapshotPath());
+}
+
+async function writeSnapshotToStorage(snapshot: Snapshot): Promise<void> {
+  const mode = getStorageMode();
+
+  if (mode === "vercel-blob") {
+    await writeSnapshotToBlob(snapshot);
     return;
   }
 
-  let lastError: unknown = null;
-
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    try {
-      db.exec(SCHEMA_SQL);
-      try {
-        db.pragma("journal_mode = WAL");
-      } catch {
-        // Fallback to default mode if WAL switch is currently locked.
-      }
-      db.pragma("synchronous = NORMAL");
-      schemaInitialized = true;
-      return;
-    } catch (error) {
-      lastError = error;
-
-      if (error instanceof Error && /SQLITE_BUSY|database is locked/i.test(error.message)) {
-        sleep(80 + attempt * 40);
-        continue;
-      }
-
-      throw error;
-    }
-  }
-
-  if (lastError instanceof Error) {
-    throw lastError;
-  }
-
-  throw new Error("Failed to initialize SQLite schema");
+  await writeSnapshotToFile(getFileSnapshotPath(), snapshot);
 }
 
-function getDb(): Database.Database {
-  if (!database) {
-    database = new Database(DATABASE_PATH);
-    database.pragma("busy_timeout = 10000");
+async function getSnapshot(forceRefresh = false): Promise<Snapshot> {
+  if (
+    !forceRefresh &&
+    snapshotCache &&
+    Date.now() - snapshotCacheLoadedAt < SNAPSHOT_CACHE_MS
+  ) {
+    return cloneSnapshot(snapshotCache);
   }
 
-  initializeSchema(database);
-  return database;
+  const snapshot = await readSnapshotFromStorage();
+  snapshotCache = cloneSnapshot(snapshot);
+  snapshotCacheLoadedAt = Date.now();
+
+  return snapshot;
 }
 
-type StoryRow = {
-  uid: string;
-  title: string;
-  url: string;
-  source: string;
-  source_type: StoryType;
-  published_at: string;
-  summary: string | null;
-  author: string | null;
-  created_at: string;
-  updated_at: string;
-};
+async function persistSnapshot(snapshot: Snapshot): Promise<void> {
+  snapshot.updatedAt = new Date().toISOString();
+  await writeSnapshotToStorage(snapshot);
+  snapshotCache = cloneSnapshot(snapshot);
+  snapshotCacheLoadedAt = Date.now();
+}
 
-function toStoryRecord(row: StoryRow): StoryRecord {
-  return {
-    uid: row.uid,
-    title: row.title,
-    url: row.url,
-    source: row.source,
-    sourceType: row.source_type,
-    publishedAt: row.published_at,
-    summary: row.summary ?? undefined,
-    author: row.author ?? undefined,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
+async function mutateSnapshot<T>(mutator: (snapshot: Snapshot) => T | Promise<T>): Promise<T> {
+  const nextOperation = writeQueue.then(async () => {
+    const snapshot = await getSnapshot(true);
+    const result = await mutator(snapshot);
+    snapshot.stories = sortStories(snapshot.stories);
+    await persistSnapshot(snapshot);
+    return result;
+  });
+
+  writeQueue = nextOperation.then(
+    () => undefined,
+    () => undefined,
+  );
+
+  return nextOperation;
 }
 
 function normalizeLimit(limit?: number): number {
@@ -124,214 +226,106 @@ function normalizeLimit(limit?: number): number {
   return Math.min(Math.max(Math.floor(limit), 1), 500);
 }
 
-export function upsertStories(stories: StoryInput[]): number {
+export function getStorageInfo() {
+  const mode = getStorageMode();
+
+  return {
+    mode,
+    durable: mode !== "tmp-file",
+    location:
+      mode === "vercel-blob" ? SNAPSHOT_PATHNAME : getFileSnapshotPath(),
+  };
+}
+
+export async function upsertStories(stories: StoryInput[]): Promise<number> {
   if (stories.length === 0) {
     return 0;
   }
 
-  const db = getDb();
-  const beforeCount = getStoryCount();
-  const now = new Date().toISOString();
+  return mutateSnapshot((snapshot) => {
+    const byUid = new Map(snapshot.stories.map((story) => [story.uid, story]));
+    let inserted = 0;
 
-  const upsertStoryStatement = db.prepare(`
-    INSERT INTO stories (
-      uid,
-      title,
-      url,
-      source,
-      source_type,
-      published_at,
-      summary,
-      author,
-      created_at,
-      updated_at
-    ) VALUES (
-      @uid,
-      @title,
-      @url,
-      @source,
-      @sourceType,
-      @publishedAt,
-      @summary,
-      @author,
-      @now,
-      @now
-    )
-    ON CONFLICT(uid) DO UPDATE SET
-      title = excluded.title,
-      url = excluded.url,
-      source = excluded.source,
-      source_type = excluded.source_type,
-      published_at = excluded.published_at,
-      summary = excluded.summary,
-      author = excluded.author,
-      updated_at = excluded.updated_at
-  `);
+    for (const incoming of stories) {
+      const existing = byUid.get(incoming.uid);
+      const now = new Date().toISOString();
 
-  const transaction = db.transaction((batch: StoryInput[]) => {
-    for (const story of batch) {
-      upsertStoryStatement.run({
-        ...story,
-        summary: story.summary ?? null,
-        author: story.author ?? null,
-        now,
+      if (!existing) {
+        inserted += 1;
+      }
+
+      byUid.set(incoming.uid, {
+        uid: incoming.uid,
+        title: incoming.title,
+        url: incoming.url,
+        source: incoming.source,
+        sourceType: incoming.sourceType,
+        publishedAt: incoming.publishedAt,
+        summary: incoming.summary,
+        author: incoming.author,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
       });
     }
+
+    snapshot.stories = [...byUid.values()];
+    return inserted;
   });
-
-  transaction(stories);
-
-  const afterCount = getStoryCount();
-  return Math.max(0, afterCount - beforeCount);
 }
 
-export function listStories(options: StoryListOptions = {}): StoryRecord[] {
-  const db = getDb();
+export async function listStories(options: StoryListOptions = {}): Promise<StoryRecord[]> {
+  const snapshot = await getSnapshot();
   const limit = normalizeLimit(options.limit);
+  const stories = options.type
+    ? snapshot.stories.filter((story) => story.sourceType === options.type)
+    : snapshot.stories;
 
-  const rows = options.type
-    ? (db
-        .prepare(
-          `
-            SELECT
-              uid,
-              title,
-              url,
-              source,
-              source_type,
-              published_at,
-              summary,
-              author,
-              created_at,
-              updated_at
-            FROM stories
-            WHERE source_type = ?
-            ORDER BY datetime(published_at) DESC, datetime(updated_at) DESC
-            LIMIT ?
-          `,
-        )
-        .all(options.type, limit) as StoryRow[])
-    : (db
-        .prepare(
-          `
-            SELECT
-              uid,
-              title,
-              url,
-              source,
-              source_type,
-              published_at,
-              summary,
-              author,
-              created_at,
-              updated_at
-            FROM stories
-            ORDER BY datetime(published_at) DESC, datetime(updated_at) DESC
-            LIMIT ?
-          `,
-        )
-        .all(limit) as StoryRow[]);
-
-  return rows.map(toStoryRecord);
+  return stories.slice(0, limit);
 }
 
-export function getStoryCount(type?: StoryType): number {
-  const db = getDb();
+export async function getStoryCount(type?: StoryType): Promise<number> {
+  const snapshot = await getSnapshot();
 
-  if (type) {
-    const result = db
-      .prepare(`SELECT COUNT(*) AS count FROM stories WHERE source_type = ?`)
-      .get(type) as
-      | {
-          count: number;
-        }
-      | undefined;
-
-    return result?.count ?? 0;
+  if (!type) {
+    return snapshot.stories.length;
   }
 
-  const result = db.prepare(`SELECT COUNT(*) AS count FROM stories`).get() as
-    | {
-        count: number;
-      }
-    | undefined;
-
-  return result?.count ?? 0;
+  return snapshot.stories.filter((story) => story.sourceType === type).length;
 }
 
-export function getStoryStats(): StoryStats {
-  const db = getDb();
+export async function getStoryStats(): Promise<StoryStats> {
+  const snapshot = await getSnapshot();
   const byType: Record<StoryType, number> = {
     news: 0,
     twitter: 0,
     farcaster: 0,
   };
 
-  const rows = db
-    .prepare(
-      `
-        SELECT source_type AS sourceType, COUNT(*) AS count
-        FROM stories
-        GROUP BY source_type
-      `,
-    )
-    .all() as Array<{ sourceType: StoryType; count: number }>;
-
-  for (const row of rows) {
-    if (row.sourceType in byType) {
-      byType[row.sourceType] = row.count;
-    }
+  for (const story of snapshot.stories) {
+    byType[story.sourceType] += 1;
   }
 
   return {
-    total: byType.news + byType.twitter + byType.farcaster,
+    total: snapshot.stories.length,
     byType,
   };
 }
 
-export function setSyncValue(key: string, value: string): void {
-  const db = getDb();
-
-  db.prepare(
-    `
-      INSERT INTO sync_state (key, value, updated_at)
-      VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-      ON CONFLICT(key) DO UPDATE SET
-        value = excluded.value,
-        updated_at = excluded.updated_at
-    `,
-  ).run(key, value);
+export async function setSyncValue(key: string, value: string): Promise<void> {
+  await mutateSnapshot((snapshot) => {
+    snapshot.sync[key] = value;
+  });
 }
 
-export function getSyncValue(key: string): string | null {
-  const db = getDb();
-
-  const row = db.prepare(`SELECT value FROM sync_state WHERE key = ?`).get(key) as
-    | {
-        value: string;
-      }
-    | undefined;
-
-  return row?.value ?? null;
+export async function getSyncValue(key: string): Promise<string | null> {
+  const snapshot = await getSnapshot();
+  return snapshot.sync[key] ?? null;
 }
 
-export function pruneStories(maxRows: number): void {
-  const db = getDb();
+export async function pruneStories(maxRows: number): Promise<void> {
   const sanitizedMaxRows = Math.max(1, Math.floor(maxRows));
 
-  db.prepare(
-    `
-      DELETE FROM stories
-      WHERE uid IN (
-        SELECT uid
-        FROM stories
-        ORDER BY datetime(published_at) DESC, datetime(updated_at) DESC
-        LIMIT -1 OFFSET ?
-      )
-    `,
-  ).run(sanitizedMaxRows);
-}
-
-export function getDatabasePath(): string {
-  return DATABASE_PATH;
+  await mutateSnapshot((snapshot) => {
+    snapshot.stories = snapshot.stories.slice(0, sanitizedMaxRows);
+  });
 }

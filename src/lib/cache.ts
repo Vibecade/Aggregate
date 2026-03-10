@@ -1,4 +1,4 @@
-import { getStoryCount, getSyncValue, setSyncValue } from "@/lib/db";
+import { getStorageInfo, getStoryCount, getSyncValue, setSyncValue } from "@/lib/db";
 import { ingestAllSources } from "@/lib/ingest";
 import type { RefreshResult } from "@/lib/types";
 
@@ -43,10 +43,10 @@ export async function refreshStories(): Promise<RefreshResult> {
 
   activeRefreshPromise = (async () => {
     const attemptTime = new Date().toISOString();
-    setSyncValue("last_attempt_sync", attemptTime);
+    await setSyncValue("last_attempt_sync", attemptTime);
 
     const result = await ingestAllSources();
-    setSyncValue("last_success_sync", result.updatedAt);
+    await setSyncValue("last_success_sync", result.updatedAt);
 
     return result;
   })();
@@ -59,19 +59,27 @@ export async function refreshStories(): Promise<RefreshResult> {
 }
 
 export async function ensureFreshStories(): Promise<void> {
-  const lastSyncedAt = getSyncValue("last_success_sync");
-  const count = getStoryCount();
+  const [lastSyncedAt, count] = await Promise.all([
+    getSyncValue("last_success_sync"),
+    getStoryCount(),
+  ]);
 
   if (count === 0 || cacheIsStale(lastSyncedAt)) {
     await refreshStories();
   }
 }
 
-export function getCacheMeta() {
+export async function getCacheMeta() {
+  const [lastAttemptAt, lastSyncedAt] = await Promise.all([
+    getSyncValue("last_attempt_sync"),
+    getSyncValue("last_success_sync"),
+  ]);
+
   return {
     ttlMinutes: getCacheTtlMinutes(),
-    lastAttemptAt: getSyncValue("last_attempt_sync"),
-    lastSyncedAt: getSyncValue("last_success_sync"),
+    lastAttemptAt,
+    lastSyncedAt,
     isRefreshing: isRefreshing(),
+    storage: getStorageInfo(),
   };
 }
