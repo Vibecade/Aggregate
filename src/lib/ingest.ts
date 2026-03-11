@@ -17,6 +17,7 @@ import type { RefreshResult, StoryInput, StoryType } from "@/lib/types";
 const REQUEST_TIMEOUT_MS = 18000;
 const DEFAULT_MAX_ROWS = 4000;
 const FARCASTER_CAST_FETCH_LIMIT = 20;
+const DEFAULT_MAX_SOCIAL_AGE_DAYS = 14;
 const parser = new Parser();
 
 interface TwitterPostEntry {
@@ -82,6 +83,15 @@ function normalizeSocialText(value: string): string {
 
 function hashValue(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function getMaxSocialAgeDays(): number {
+  const parsed = Number(process.env.MAX_SOCIAL_AGE_DAYS ?? DEFAULT_MAX_SOCIAL_AGE_DAYS);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_MAX_SOCIAL_AGE_DAYS;
+  }
+
+  return Math.floor(parsed);
 }
 
 function ensureIsoDate(value: string | undefined, fallbackShiftMinutes = 0): string {
@@ -467,6 +477,16 @@ function decodeTweetDate(statusUrl: string): string | null {
   }
 }
 
+function isRecentEnoughForSocial(isoDate: string): boolean {
+  const parsed = new Date(isoDate);
+  if (Number.isNaN(parsed.getTime())) {
+    return false;
+  }
+
+  const maxAgeMs = getMaxSocialAgeDays() * 24 * 60 * 60 * 1000;
+  return Date.now() - parsed.getTime() <= maxAgeMs;
+}
+
 function dedupeStories(stories: StoryInput[]): StoryInput[] {
   const orderedStories = [...stories].sort((a, b) => {
     const aTime = new Date(a.publishedAt).getTime();
@@ -538,21 +558,30 @@ async function fetchTwitterStories(source: TwitterSource): Promise<StoryInput[]>
 
   const entries = extractTwitterPostEntries(markdown, source.maxItems);
 
-  return entries.map((entry, index) => {
-    const url = entry.statusUrl ?? profileUrl;
-    const publishedAt = decodeTweetDate(url) ?? ensureIsoDate(undefined, index * 5);
-    const uid = hashValue(`twitter|${source.handle}|${url}|${entry.snippet}`);
+  return entries.flatMap((entry) => {
+    if (!entry.statusUrl) {
+      return [];
+    }
 
-    return {
-      uid,
-      title: shorten(entry.snippet, 140),
-      url,
-      source: `X @${source.handle}`,
-      sourceType: "twitter" as const,
-      publishedAt,
-      summary: shorten(entry.snippet, 260),
-      author: source.handle,
-    };
+    const publishedAt = decodeTweetDate(entry.statusUrl);
+    if (!publishedAt || !isRecentEnoughForSocial(publishedAt)) {
+      return [];
+    }
+
+    const uid = hashValue(`twitter|${source.handle}|${entry.statusUrl}|${entry.snippet}`);
+
+    return [
+      {
+        uid,
+        title: shorten(entry.snippet, 140),
+        url: entry.statusUrl,
+        source: `X @${source.handle}`,
+        sourceType: "twitter" as const,
+        publishedAt,
+        summary: shorten(entry.snippet, 260),
+        author: source.handle,
+      },
+    ];
   });
 }
 
@@ -568,6 +597,9 @@ async function fetchFarcasterStories(source: FarcasterSource): Promise<StoryInpu
     const casts = await getFarcasterProfileCasts(profile);
     const relevantCasts = casts
       .filter((cast) => cryptoRelevant(normalizeSocialText(cast.text)))
+      .filter((cast) =>
+        isRecentEnoughForSocial(new Date(cast.timestamp).toISOString()),
+      )
       .slice(0, source.maxItems);
 
     return relevantCasts.map((cast, index) => {
@@ -611,29 +643,35 @@ async function fetchFarcasterStories(source: FarcasterSource): Promise<StoryInpu
   const stories: StoryInput[] = [];
   const seenUrls = new Set<string>();
 
-  for (const [index, candidate] of candidates.entries()) {
+  for (const candidate of candidates) {
     if (stories.length >= source.maxItems) {
       break;
     }
 
-    let resolvedUrl = candidate.fallbackUrl;
-    let publishedAt = ensureIsoDate(undefined, index * 6);
+    let resolvedUrl: string | null = null;
+    let publishedAt: string | null = null;
     let author = candidate.authorUsername;
 
     if (candidate.authorUsername) {
       const profile = await getFarcasterProfile(candidate.authorUsername);
       if (profile) {
         author = profile.username;
-        resolvedUrl = profile.profileUrl;
 
         const casts = await getFarcasterProfileCasts(profile);
         const matchedCast = casts.find((cast) => farcasterTextsLikelyMatch(candidate.text, cast.text));
 
         if (matchedCast) {
-          resolvedUrl = buildFarcasterCastUrl(profile.username, matchedCast.hash);
-          publishedAt = ensureIsoDate(new Date(matchedCast.timestamp).toISOString(), index * 6);
+          const matchedPublishedAt = ensureIsoDate(new Date(matchedCast.timestamp).toISOString());
+          if (isRecentEnoughForSocial(matchedPublishedAt)) {
+            resolvedUrl = buildFarcasterCastUrl(profile.username, matchedCast.hash);
+            publishedAt = matchedPublishedAt;
+          }
         }
       }
+    }
+
+    if (!resolvedUrl || !publishedAt) {
+      continue;
     }
 
     if (seenUrls.has(resolvedUrl)) {

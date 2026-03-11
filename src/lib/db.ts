@@ -18,6 +18,7 @@ const SNAPSHOT_PATHNAME = "aggregate/stories-cache.json";
 const LOCAL_DIRECTORY = path.join(process.cwd(), "data");
 const LOCAL_SNAPSHOT_PATH = path.join(LOCAL_DIRECTORY, "stories-cache.json");
 const TMP_SNAPSHOT_PATH = path.join("/tmp", "aggregate", "stories-cache.json");
+const DEFAULT_MAX_SOCIAL_AGE_DAYS = 14;
 
 let snapshotCache: Snapshot | null = null;
 let snapshotCacheLoadedAt = 0;
@@ -64,6 +65,29 @@ function normalizeStoryTitle(title: string): string {
   return title.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+function getMaxSocialAgeDays(): number {
+  const parsed = Number(process.env.MAX_SOCIAL_AGE_DAYS ?? DEFAULT_MAX_SOCIAL_AGE_DAYS);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_MAX_SOCIAL_AGE_DAYS;
+  }
+
+  return Math.floor(parsed);
+}
+
+function isWithinSocialWindow(story: StoryRecord): boolean {
+  if (story.sourceType === "news") {
+    return true;
+  }
+
+  const publishedAt = new Date(story.publishedAt);
+  if (Number.isNaN(publishedAt.getTime())) {
+    return false;
+  }
+
+  const maxAgeMs = getMaxSocialAgeDays() * 24 * 60 * 60 * 1000;
+  return Date.now() - publishedAt.getTime() <= maxAgeMs;
+}
+
 function getCanonicalSocialUrl(story: StoryRecord): string | null {
   const normalizedUrl = normalizeStoryUrl(story.url);
 
@@ -84,6 +108,14 @@ function getCanonicalSocialUrl(story: StoryRecord): string | null {
   }
 
   return null;
+}
+
+function isDisplayableStory(story: StoryRecord): boolean {
+  if (story.sourceType === "news") {
+    return true;
+  }
+
+  return Boolean(getCanonicalSocialUrl(story)) && isWithinSocialWindow(story);
 }
 
 function getSocialTitleKey(story: StoryRecord): string {
@@ -167,6 +199,10 @@ function dedupeStories(stories: StoryRecord[]): StoryRecord[] {
   const seenCanonicalUrls = new Set<string>();
 
   for (const story of sortedByPriority) {
+    if (!isDisplayableStory(story)) {
+      continue;
+    }
+
     if (story.sourceType === "news") {
       const normalizedUrl = normalizeStoryUrl(story.url);
       if (seenNewsUrls.has(normalizedUrl)) {
@@ -433,8 +469,10 @@ export async function listStories(options: StoryListOptions = {}): Promise<Story
   const snapshot = await getSnapshot();
   const limit = normalizeLimit(options.limit);
   const stories = options.type
-    ? snapshot.stories.filter((story) => story.sourceType === options.type)
-    : snapshot.stories;
+    ? snapshot.stories.filter(
+        (story) => story.sourceType === options.type && isDisplayableStory(story),
+      )
+    : snapshot.stories.filter(isDisplayableStory);
 
   return stories.slice(0, limit);
 }
@@ -443,10 +481,12 @@ export async function getStoryCount(type?: StoryType): Promise<number> {
   const snapshot = await getSnapshot();
 
   if (!type) {
-    return snapshot.stories.length;
+    return snapshot.stories.filter(isDisplayableStory).length;
   }
 
-  return snapshot.stories.filter((story) => story.sourceType === type).length;
+  return snapshot.stories.filter(
+    (story) => story.sourceType === type && isDisplayableStory(story),
+  ).length;
 }
 
 export async function getStoryStats(): Promise<StoryStats> {
@@ -458,11 +498,15 @@ export async function getStoryStats(): Promise<StoryStats> {
   };
 
   for (const story of snapshot.stories) {
+    if (!isDisplayableStory(story)) {
+      continue;
+    }
+
     byType[story.sourceType] += 1;
   }
 
   return {
-    total: snapshot.stories.length,
+    total: Object.values(byType).reduce((sum, count) => sum + count, 0),
     byType,
   };
 }
