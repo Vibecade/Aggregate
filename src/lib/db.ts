@@ -56,8 +56,164 @@ function cloneSnapshot(snapshot: Snapshot): Snapshot {
   return JSON.parse(JSON.stringify(snapshot)) as Snapshot;
 }
 
+function normalizeStoryUrl(url: string): string {
+  return url.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase();
+}
+
+function normalizeStoryTitle(title: string): string {
+  return title.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function getCanonicalSocialUrl(story: StoryRecord): string | null {
+  const normalizedUrl = normalizeStoryUrl(story.url);
+
+  if (
+    story.sourceType === "twitter" &&
+    /^https:\/\/x\.com\/[a-z0-9_]+\/status\/\d+$/i.test(normalizedUrl)
+  ) {
+    return normalizedUrl;
+  }
+
+  if (
+    story.sourceType === "farcaster" &&
+    /^https:\/\/(?:farcaster\.xyz|warpcast\.com)\/[a-z0-9_.-]+\/0x[0-9a-f]+$/i.test(
+      normalizedUrl,
+    )
+  ) {
+    return normalizedUrl.replace("https://warpcast.com/", "https://farcaster.xyz/");
+  }
+
+  return null;
+}
+
+function getSocialTitleKey(story: StoryRecord): string {
+  return `${story.sourceType}|${story.source.toLowerCase()}|${normalizeStoryTitle(story.title)}`;
+}
+
+function isProfileStyleSocialSource(story: StoryRecord): boolean {
+  if (story.sourceType === "twitter") {
+    return true;
+  }
+
+  return story.sourceType === "farcaster" && !story.source.toLowerCase().includes("channel");
+}
+
+function compareStoryPriority(left: StoryRecord, right: StoryRecord): number {
+  const leftCanonical = getCanonicalSocialUrl(left);
+  const rightCanonical = getCanonicalSocialUrl(right);
+
+  if (Boolean(leftCanonical) !== Boolean(rightCanonical)) {
+    return leftCanonical ? -1 : 1;
+  }
+
+  if (Boolean(left.author) !== Boolean(right.author)) {
+    return left.author ? -1 : 1;
+  }
+
+  if (
+    left.sourceType === "farcaster" &&
+    right.sourceType === "farcaster" &&
+    left.url !== right.url
+  ) {
+    const leftIsCanonicalHost = left.url.startsWith("https://farcaster.xyz/");
+    const rightIsCanonicalHost = right.url.startsWith("https://farcaster.xyz/");
+
+    if (leftIsCanonicalHost !== rightIsCanonicalHost) {
+      return leftIsCanonicalHost ? -1 : 1;
+    }
+  }
+
+  const leftPublished = new Date(left.publishedAt).getTime();
+  const rightPublished = new Date(right.publishedAt).getTime();
+
+  if (leftPublished !== rightPublished) {
+    return rightPublished - leftPublished;
+  }
+
+  const leftUpdated = new Date(left.updatedAt).getTime();
+  const rightUpdated = new Date(right.updatedAt).getTime();
+
+  if (leftUpdated !== rightUpdated) {
+    return rightUpdated - leftUpdated;
+  }
+
+  return right.title.length - left.title.length;
+}
+
+function dedupeStories(stories: StoryRecord[]): StoryRecord[] {
+  const sortedByPriority = [...stories].sort(compareStoryPriority);
+  const canonicalByUrl = new Map<string, StoryRecord>();
+  const canonicalTitleKeys = new Set<string>();
+  const canonicalSources = new Set<string>();
+
+  for (const story of sortedByPriority) {
+    if (story.sourceType === "news") {
+      continue;
+    }
+
+    const canonicalUrl = getCanonicalSocialUrl(story);
+    if (!canonicalUrl || canonicalByUrl.has(canonicalUrl)) {
+      continue;
+    }
+
+    canonicalByUrl.set(canonicalUrl, story);
+    canonicalTitleKeys.add(getSocialTitleKey(story));
+    canonicalSources.add(`${story.sourceType}|${story.source}`);
+  }
+
+  const deduped: StoryRecord[] = [];
+  const seenNewsUrls = new Set<string>();
+  const seenFallbackKeys = new Set<string>();
+  const seenCanonicalUrls = new Set<string>();
+
+  for (const story of sortedByPriority) {
+    if (story.sourceType === "news") {
+      const normalizedUrl = normalizeStoryUrl(story.url);
+      if (seenNewsUrls.has(normalizedUrl)) {
+        continue;
+      }
+
+      seenNewsUrls.add(normalizedUrl);
+      deduped.push(story);
+      continue;
+    }
+
+    const canonicalUrl = getCanonicalSocialUrl(story);
+
+    if (canonicalUrl) {
+      if (seenCanonicalUrls.has(canonicalUrl)) {
+        continue;
+      }
+
+      const preferredStory = canonicalByUrl.get(canonicalUrl);
+      if (!preferredStory || preferredStory.uid !== story.uid) {
+        continue;
+      }
+
+      seenCanonicalUrls.add(canonicalUrl);
+      deduped.push(preferredStory);
+      continue;
+    }
+
+    const titleKey = getSocialTitleKey(story);
+    const sourceKey = `${story.sourceType}|${story.source}`;
+    if (
+      canonicalTitleKeys.has(titleKey) ||
+      seenFallbackKeys.has(titleKey) ||
+      (canonicalSources.has(sourceKey) && isProfileStyleSocialSource(story))
+    ) {
+      continue;
+    }
+
+    seenFallbackKeys.add(titleKey);
+    deduped.push(story);
+  }
+
+  return deduped;
+}
+
 function sortStories(stories: StoryRecord[]): StoryRecord[] {
-  return [...stories].sort((left, right) => {
+  return [...dedupeStories(stories)].sort((left, right) => {
     const leftTime = new Date(left.publishedAt).getTime();
     const rightTime = new Date(right.publishedAt).getTime();
 

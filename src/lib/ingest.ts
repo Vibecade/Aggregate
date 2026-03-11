@@ -16,13 +16,66 @@ import type { RefreshResult, StoryInput, StoryType } from "@/lib/types";
 
 const REQUEST_TIMEOUT_MS = 18000;
 const DEFAULT_MAX_ROWS = 4000;
+const FARCASTER_CAST_FETCH_LIMIT = 20;
 const parser = new Parser();
+
+interface TwitterPostEntry {
+  snippet: string;
+  statusUrl?: string;
+}
+
+interface FarcasterUserResponse {
+  result?: {
+    user?: {
+      fid?: number;
+      username?: string;
+    };
+  };
+}
+
+interface FarcasterProfileCastsResponse {
+  result?: {
+    casts?: FarcasterCast[];
+  };
+}
+
+interface FarcasterCast {
+  hash: string;
+  timestamp: number;
+  text: string;
+  author?: {
+    username?: string;
+  };
+}
+
+interface FarcasterProfile {
+  fid: number;
+  username: string;
+  profileUrl: string;
+}
+
+interface FarcasterSnippetCandidate {
+  text: string;
+  authorUsername?: string;
+  fallbackUrl: string;
+}
+
+const farcasterProfileCache = new Map<string, Promise<FarcasterProfile | null>>();
+const farcasterCastCache = new Map<string, Promise<FarcasterCast[]>>();
 
 function normalizeText(value: string): string {
   return value
     .replace(/<[^>]*>/g, " ")
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeSocialText(value: string): string {
+  return normalizeText(value)
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -70,6 +123,32 @@ async function fetchText(url: string): Promise<string> {
   }
 }
 
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      ...init,
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        "User-Agent": "AggregateBot/1.0 (+https://localhost)",
+        Accept: "application/json, text/plain, */*",
+        ...(init?.headers ?? {}),
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function cryptoRelevant(text: string): boolean {
   const lower = text.toLowerCase();
   return CRYPTO_KEYWORDS.some((keyword) => lower.includes(keyword));
@@ -106,44 +185,128 @@ function shouldIgnoreSocialLine(line: string): boolean {
   return false;
 }
 
-function collectSocialSnippets(lines: string[], maxItems: number): string[] {
-  const snippets: string[] = [];
+function isUsableSocialSnippet(line: string): boolean {
+  if (line.length < 28 || line.length > 360) {
+    return false;
+  }
+
+  if (
+    line.startsWith("Title:") ||
+    line.startsWith("URL Source:") ||
+    line.startsWith("Markdown Content:") ||
+    line.startsWith("Replying to") ||
+    line.startsWith("Quote") ||
+    line.startsWith("http") ||
+    line.startsWith("[") ||
+    line.startsWith("!") ||
+    line.startsWith(">")
+  ) {
+    return false;
+  }
+
+  if (shouldIgnoreSocialLine(line)) {
+    return false;
+  }
+
+  if (!/[A-Za-z]/.test(line)) {
+    return false;
+  }
+
+  if (/^[0-9.,kKmM]+$/.test(line)) {
+    return false;
+  }
+
+  if (!cryptoRelevant(line)) {
+    return false;
+  }
+
+  return true;
+}
+
+function normalizeTwitterStatusUrl(url: string): string {
+  return url.replace(/\/photo\/\d+$/i, "").replace(/[),.;]+$/, "");
+}
+
+function extractTwitterPostEntries(markdown: string, maxItems: number): TwitterPostEntry[] {
+  const lines = markdown.split("\n");
+  const postsStartIndex = lines.findIndex((line) =>
+    /(?:'s|\u2019s) posts$/i.test(normalizeText(line)),
+  );
+  const relevantLines = postsStartIndex >= 0 ? lines.slice(postsStartIndex + 1) : lines;
+
+  const entries: TwitterPostEntry[] = [];
   const seen = new Set<string>();
+  let currentEntry: TwitterPostEntry | null = null;
 
-  for (const rawLine of lines) {
-    const line = normalizeText(rawLine);
+  const flushCurrentEntry = () => {
+    if (!currentEntry) {
+      return;
+    }
 
-    if (line.length < 28 || line.length > 360) {
+    if (!seen.has(currentEntry.snippet)) {
+      seen.add(currentEntry.snippet);
+      entries.push(currentEntry);
+    }
+
+    currentEntry = null;
+  };
+
+  for (const rawLine of relevantLines) {
+    const line = normalizeSocialText(rawLine);
+    const statusMatch = rawLine.match(/https:\/\/x\.com\/[A-Za-z0-9_]+\/status\/\d+(?:\/photo\/\d+)?/);
+
+    if (statusMatch && currentEntry && !currentEntry.statusUrl) {
+      currentEntry.statusUrl = normalizeTwitterStatusUrl(statusMatch[0]);
+    }
+
+    if (!isUsableSocialSnippet(line)) {
       continue;
     }
 
-    if (
-      line.startsWith("Title:") ||
-      line.startsWith("URL Source:") ||
-      line.startsWith("Markdown Content:") ||
-      line.startsWith("Replying to") ||
-      line.startsWith("Quote") ||
-      line.startsWith("http") ||
-      line.startsWith("[") ||
-      line.startsWith("!") ||
-      line.startsWith(">")
-    ) {
-      continue;
+    if (currentEntry) {
+      flushCurrentEntry();
     }
 
-    if (shouldIgnoreSocialLine(line)) {
-      continue;
+    currentEntry = {
+      snippet: line,
+      statusUrl: statusMatch ? normalizeTwitterStatusUrl(statusMatch[0]) : undefined,
+    };
+
+    if (entries.length >= maxItems) {
+      break;
+    }
+  }
+
+  flushCurrentEntry();
+
+  return entries.slice(0, maxItems);
+}
+
+function extractFarcasterUsernameFromUrl(url: string): string | null {
+  const match = url.match(/^https:\/\/(?:warpcast\.com|farcaster\.xyz)\/([A-Za-z0-9_.-]+)$/i);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+function extractFarcasterChannelCandidates(
+  markdown: string,
+  sourceUrl: string,
+  maxItems: number,
+): FarcasterSnippetCandidate[] {
+  const candidates: FarcasterSnippetCandidate[] = [];
+  const seen = new Set<string>();
+  let currentAuthorUsername: string | undefined;
+
+  for (const rawLine of markdown.split("\n")) {
+    const avatarMatch = rawLine.match(
+      /^\[!\[Image .* avatar\]\([^)]*\)\]\(https:\/\/(?:farcaster\.xyz|warpcast\.com)\/([A-Za-z0-9_.-]+)\)/i,
+    );
+
+    if (avatarMatch) {
+      currentAuthorUsername = avatarMatch[1].toLowerCase();
     }
 
-    if (!/[A-Za-z]/.test(line)) {
-      continue;
-    }
-
-    if (/^[0-9.,kKmM]+$/.test(line)) {
-      continue;
-    }
-
-    if (!cryptoRelevant(line)) {
+    const line = normalizeSocialText(rawLine);
+    if (!isUsableSocialSnippet(line)) {
       continue;
     }
 
@@ -152,72 +315,116 @@ function collectSocialSnippets(lines: string[], maxItems: number): string[] {
     }
 
     seen.add(line);
-    snippets.push(line);
+    candidates.push({
+      text: line,
+      authorUsername: currentAuthorUsername,
+      fallbackUrl: currentAuthorUsername
+        ? `https://farcaster.xyz/${currentAuthorUsername}`
+        : sourceUrl,
+    });
 
-    if (snippets.length >= maxItems) {
+    if (candidates.length >= maxItems) {
       break;
     }
   }
 
-  return snippets;
+  return candidates;
 }
 
-function parseSocialSnippets(markdown: string, maxItems: number): string[] {
-  return collectSocialSnippets(markdown.split("\n"), maxItems);
+function getFarcasterCastHashPrefix(hash: string): string {
+  return hash.slice(0, 10).toLowerCase();
 }
 
-function parseTwitterSnippets(markdown: string, maxItems: number): string[] {
-  const lines = markdown.split("\n");
-  const postsStartIndex = lines.findIndex((line) =>
-    /(?:'s|\u2019s) posts$/i.test(normalizeText(line)),
-  );
+function buildFarcasterCastUrl(username: string, hash: string): string {
+  return `https://farcaster.xyz/${username.toLowerCase()}/${getFarcasterCastHashPrefix(hash)}`;
+}
 
-  if (postsStartIndex >= 0) {
-    return collectSocialSnippets(lines.slice(postsStartIndex + 1), maxItems);
+function normalizeComparableText(value: string): string {
+  return normalizeSocialText(value)
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/www\.\S+/gi, " ")
+    .replace(/[`"'()[\]{}]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function farcasterTextsLikelyMatch(snippet: string, castText: string): boolean {
+  const snippetComparable = normalizeComparableText(snippet)
+    .replace(/\.\.\.$/, "")
+    .replace(/…$/, "")
+    .trim();
+  const castComparable = normalizeComparableText(castText);
+
+  if (!snippetComparable || !castComparable) {
+    return false;
   }
 
-  return collectSocialSnippets(lines, maxItems);
-}
-
-function parseTwitterStatusUrls(markdown: string): string[] {
-  const matches = [...markdown.matchAll(/https:\/\/x\.com\/[A-Za-z0-9_]+\/status\/\d+/g)];
-  const seen = new Set<string>();
-  const urls: string[] = [];
-
-  for (const match of matches) {
-    const url = match[0];
-    if (!seen.has(url)) {
-      seen.add(url);
-      urls.push(url);
-    }
+  if (castComparable === snippetComparable || castComparable.startsWith(snippetComparable)) {
+    return true;
   }
 
-  return urls;
-}
-
-function parseFarcasterUrls(markdown: string): string[] {
-  const matches = [
-    ...markdown.matchAll(/https:\/\/(?:warpcast|farcaster)\.com\/[A-Za-z0-9_./~-]+/g),
-  ];
-
-  const seen = new Set<string>();
-  const urls: string[] = [];
-
-  for (const match of matches) {
-    const url = match[0].replace(/[),.;]+$/, "");
-    const isCastUrl = /\/0x[0-9a-fA-F]+/.test(url) || /\/casts\//.test(url);
-
-    if (!isCastUrl) {
-      continue;
-    }
-
-    if (!seen.has(url)) {
-      seen.add(url);
-      urls.push(url);
-    }
+  if (snippetComparable.length >= 48 && castComparable.includes(snippetComparable)) {
+    return true;
   }
 
-  return urls;
+  const prefix = snippetComparable.slice(0, Math.min(snippetComparable.length, 120)).trim();
+  return prefix.length >= 24 && castComparable.startsWith(prefix);
+}
+
+async function getFarcasterProfile(username: string): Promise<FarcasterProfile | null> {
+  const normalizedUsername = username.trim().toLowerCase();
+  const cachedProfile = farcasterProfileCache.get(normalizedUsername);
+  if (cachedProfile) {
+    return cachedProfile;
+  }
+
+  const profilePromise = (async () => {
+    const data = await fetchJson<FarcasterUserResponse>(
+      `https://client.farcaster.xyz/v2/user-by-username?username=${encodeURIComponent(
+        normalizedUsername,
+      )}`,
+    );
+    const fid = data.result?.user?.fid;
+    const resolvedUsername = data.result?.user?.username?.trim().toLowerCase();
+
+    if (!fid || !resolvedUsername) {
+      return null;
+    }
+
+    return {
+      fid,
+      username: resolvedUsername,
+      profileUrl: `https://farcaster.xyz/${resolvedUsername}`,
+    };
+  })();
+
+  farcasterProfileCache.set(normalizedUsername, profilePromise);
+  return profilePromise;
+}
+
+async function getFarcasterProfileCasts(profile: FarcasterProfile): Promise<FarcasterCast[]> {
+  const cacheKey = String(profile.fid);
+  const cachedCasts = farcasterCastCache.get(cacheKey);
+  if (cachedCasts) {
+    return cachedCasts;
+  }
+
+  const castsPromise = (async () => {
+    const data = await fetchJson<FarcasterProfileCastsResponse>(
+      `https://client.farcaster.xyz/v2/profile-casts?fid=${profile.fid}&limit=${FARCASTER_CAST_FETCH_LIMIT}`,
+    );
+
+    return (data.result?.casts ?? []).filter(
+      (cast): cast is FarcasterCast =>
+        typeof cast.hash === "string" &&
+        typeof cast.text === "string" &&
+        typeof cast.timestamp === "number",
+    );
+  })();
+
+  farcasterCastCache.set(cacheKey, castsPromise);
+  return castsPromise;
 }
 
 function normalizeStoryUrl(url: string): string {
@@ -329,48 +536,126 @@ async function fetchTwitterStories(source: TwitterSource): Promise<StoryInput[]>
   const profileUrl = `https://x.com/${source.handle}`;
   const markdown = await fetchText(toJinaUrl(profileUrl));
 
-  const snippets = parseTwitterSnippets(markdown, source.maxItems);
-  const statusUrls = parseTwitterStatusUrls(markdown);
+  const entries = extractTwitterPostEntries(markdown, source.maxItems);
 
-  return snippets.map((snippet, index) => {
-    const url = statusUrls[index] ?? profileUrl;
+  return entries.map((entry, index) => {
+    const url = entry.statusUrl ?? profileUrl;
     const publishedAt = decodeTweetDate(url) ?? ensureIsoDate(undefined, index * 5);
-    const uid = hashValue(`twitter|${source.handle}|${url}|${snippet}`);
+    const uid = hashValue(`twitter|${source.handle}|${url}|${entry.snippet}`);
 
     return {
       uid,
-      title: shorten(snippet, 140),
+      title: shorten(entry.snippet, 140),
       url,
       source: `X @${source.handle}`,
       sourceType: "twitter" as const,
       publishedAt,
-      summary: shorten(snippet, 260),
+      summary: shorten(entry.snippet, 260),
       author: source.handle,
     };
   });
 }
 
 async function fetchFarcasterStories(source: FarcasterSource): Promise<StoryInput[]> {
+  const sourceUsername = extractFarcasterUsernameFromUrl(source.url);
+
+  if (sourceUsername) {
+    const profile = await getFarcasterProfile(sourceUsername);
+    if (!profile) {
+      throw new Error(`Unable to resolve Farcaster profile for ${sourceUsername}`);
+    }
+
+    const casts = await getFarcasterProfileCasts(profile);
+    const relevantCasts = casts
+      .filter((cast) => cryptoRelevant(normalizeSocialText(cast.text)))
+      .slice(0, source.maxItems);
+
+    return relevantCasts.map((cast, index) => {
+      const text = normalizeSocialText(cast.text);
+      const url = buildFarcasterCastUrl(profile.username, cast.hash);
+      const publishedAt = ensureIsoDate(new Date(cast.timestamp).toISOString(), index * 6);
+      const uid = hashValue(`farcaster|${source.label}|${url}|${text}`);
+
+      return {
+        uid,
+        title: shorten(text, 140),
+        url,
+        source: `Farcaster ${source.label}`,
+        sourceType: "farcaster" as const,
+        publishedAt,
+        summary: shorten(text, 260),
+        author: profile.username,
+      };
+    });
+  }
+
   const markdown = await fetchText(toJinaUrl(source.url));
+  const candidates = extractFarcasterChannelCandidates(markdown, source.url, source.maxItems * 3);
+  const authorUsernames = [
+    ...new Set(
+      candidates
+        .map((candidate) => candidate.authorUsername)
+        .filter((username): username is string => Boolean(username)),
+    ),
+  ];
 
-  const snippets = parseSocialSnippets(markdown, source.maxItems);
-  const castUrls = parseFarcasterUrls(markdown);
+  await Promise.all(
+    authorUsernames.map(async (username) => {
+      const profile = await getFarcasterProfile(username);
+      if (profile) {
+        await getFarcasterProfileCasts(profile);
+      }
+    }),
+  );
 
-  return snippets.map((snippet, index) => {
-    const url = castUrls[index] ?? source.url;
-    const publishedAt = ensureIsoDate(undefined, index * 6);
-    const uid = hashValue(`farcaster|${source.label}|${url}|${snippet}`);
+  const stories: StoryInput[] = [];
+  const seenUrls = new Set<string>();
 
-    return {
+  for (const [index, candidate] of candidates.entries()) {
+    if (stories.length >= source.maxItems) {
+      break;
+    }
+
+    let resolvedUrl = candidate.fallbackUrl;
+    let publishedAt = ensureIsoDate(undefined, index * 6);
+    let author = candidate.authorUsername;
+
+    if (candidate.authorUsername) {
+      const profile = await getFarcasterProfile(candidate.authorUsername);
+      if (profile) {
+        author = profile.username;
+        resolvedUrl = profile.profileUrl;
+
+        const casts = await getFarcasterProfileCasts(profile);
+        const matchedCast = casts.find((cast) => farcasterTextsLikelyMatch(candidate.text, cast.text));
+
+        if (matchedCast) {
+          resolvedUrl = buildFarcasterCastUrl(profile.username, matchedCast.hash);
+          publishedAt = ensureIsoDate(new Date(matchedCast.timestamp).toISOString(), index * 6);
+        }
+      }
+    }
+
+    if (seenUrls.has(resolvedUrl)) {
+      continue;
+    }
+
+    seenUrls.add(resolvedUrl);
+
+    const uid = hashValue(`farcaster|${source.label}|${resolvedUrl}|${candidate.text}`);
+    stories.push({
       uid,
-      title: shorten(snippet, 140),
-      url,
+      title: shorten(candidate.text, 140),
+      url: resolvedUrl,
       source: `Farcaster ${source.label}`,
       sourceType: "farcaster" as const,
       publishedAt,
-      summary: shorten(snippet, 260),
-    };
-  });
+      summary: shorten(candidate.text, 260),
+      author,
+    });
+  }
+
+  return stories;
 }
 
 export async function ingestAllSources(): Promise<RefreshResult> {
