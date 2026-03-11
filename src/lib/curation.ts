@@ -12,6 +12,9 @@ export interface CuratedStory extends StoryRecord {
   topics: TopicTag[];
   primaryTopic: TopicTag | null;
   tokens: string[];
+  searchText: string;
+  sourceWeight: number;
+  score: number;
 }
 
 export interface StoryCluster {
@@ -21,9 +24,11 @@ export interface StoryCluster {
   title: string;
   summary: string | undefined;
   publishedAt: string;
+  leadStory: CuratedStory;
   stories: CuratedStory[];
   sources: string[];
   sourceCount: number;
+  score: number;
 }
 
 interface TopicDefinition extends TopicTag {
@@ -88,6 +93,36 @@ const STOPWORDS = new Set([
 ]);
 
 const SHORT_KEEPERS = new Set(["btc", "eth", "sec", "etf", "defi", "dao", "sol"]);
+const SOURCE_WEIGHTS: Array<{ pattern: RegExp; weight: number }> = [
+  { pattern: /^Financial Times Cryptofinance$/i, weight: 100 },
+  { pattern: /^The Block$/i, weight: 98 },
+  { pattern: /^CoinDesk$/i, weight: 96 },
+  { pattern: /^Blockworks$/i, weight: 94 },
+  { pattern: /^Decrypt$/i, weight: 92 },
+  { pattern: /^Unchained$/i, weight: 91 },
+  { pattern: /^Ethereum Foundation Blog$/i, weight: 95 },
+  { pattern: /^Solana Blog$/i, weight: 92 },
+  { pattern: /^Chainlink Blog$/i, weight: 90 },
+  { pattern: /^The Defiant$/i, weight: 89 },
+  { pattern: /^Cointelegraph$/i, weight: 87 },
+  { pattern: /^Bitcoin Magazine$/i, weight: 86 },
+  { pattern: /^CryptoSlate$/i, weight: 82 },
+  { pattern: /^TechCrunch Crypto$/i, weight: 80 },
+  { pattern: /^crypto\.news$/i, weight: 78 },
+  { pattern: /^Protos$/i, weight: 76 },
+  { pattern: /^X @VitalikButerin$/i, weight: 92 },
+  { pattern: /^X @coinbase$/i, weight: 88 },
+  { pattern: /^X @brian_armstrong$/i, weight: 86 },
+  { pattern: /^X @solana$/i, weight: 85 },
+  { pattern: /^X @WuBlockchain$/i, weight: 84 },
+  { pattern: /^X @CoinDesk$/i, weight: 82 },
+  { pattern: /^X @BanklessHQ$/i, weight: 78 },
+  { pattern: /^X @Cointelegraph$/i, weight: 74 },
+  { pattern: /^X @lookonchain$/i, weight: 72 },
+  { pattern: /^Farcaster vitalik\.eth$/i, weight: 88 },
+  { pattern: /^Farcaster jesse\.base\.eth$/i, weight: 83 },
+  { pattern: /^Farcaster .*channel$/i, weight: 70 },
+];
 
 function normalizeText(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
@@ -95,6 +130,42 @@ function normalizeText(value: string): string {
 
 function storyText(story: StoryRecord): string {
   return normalizeText([story.title, story.summary, story.source, story.author].filter(Boolean).join(" "));
+}
+
+function sourceWeightForStory(story: StoryRecord): number {
+  for (const entry of SOURCE_WEIGHTS) {
+    if (entry.pattern.test(story.source)) {
+      return entry.weight;
+    }
+  }
+
+  return story.sourceType === "news" ? 75 : 68;
+}
+
+function freshnessBoost(story: StoryRecord): number {
+  const publishedAt = new Date(story.publishedAt);
+  if (Number.isNaN(publishedAt.getTime())) {
+    return 0;
+  }
+
+  const ageHours = Math.max(0, (Date.now() - publishedAt.getTime()) / (1000 * 60 * 60));
+  const horizonHours = story.sourceType === "news" ? 96 : 72;
+
+  return Math.max(0, horizonHours - ageHours) / 4;
+}
+
+function storyScore(story: StoryRecord): number {
+  const topicBonus = inferTopics(story).length * 2.5;
+  const summaryBonus = story.summary ? 1.5 : 0;
+  return sourceWeightForStory(story) + freshnessBoost(story) + topicBonus + summaryBonus;
+}
+
+function compareCuratedStories(left: CuratedStory, right: CuratedStory): number {
+  if (left.score !== right.score) {
+    return right.score - left.score;
+  }
+
+  return new Date(right.publishedAt).getTime() - new Date(left.publishedAt).getTime();
 }
 
 function tokenize(value: string): string[] {
@@ -192,6 +263,7 @@ function storiesAreRelated(left: CuratedStory, right: CuratedStory): boolean {
 export function curateStories(stories: StoryRecord[]): CuratedStory[] {
   return stories.map((story) => {
     const topics = inferTopics(story);
+    const score = storyScore(story);
 
     return {
       ...story,
@@ -199,18 +271,21 @@ export function curateStories(stories: StoryRecord[]): CuratedStory[] {
       topics,
       primaryTopic: topics[0] ?? null,
       tokens: tokenize([story.title, story.summary ?? ""].join(" ")),
+      searchText: normalizeText(
+        [story.title, story.summary, story.source, story.author, ...topics.map((topic) => topic.label)].join(" "),
+      ),
+      sourceWeight: sourceWeightForStory(story),
+      score,
     };
   });
 }
 
 export function buildStoryClusters(stories: CuratedStory[]): StoryCluster[] {
   const clusters: StoryCluster[] = [];
-  const orderedStories = [...stories].sort(
-    (left, right) => new Date(right.publishedAt).getTime() - new Date(left.publishedAt).getTime(),
-  );
+  const orderedStories = [...stories].sort(compareCuratedStories);
 
   for (const story of orderedStories) {
-    const existingCluster = clusters.find((cluster) => storiesAreRelated(cluster.stories[0], story));
+    const existingCluster = clusters.find((cluster) => storiesAreRelated(cluster.leadStory, story));
 
     if (!existingCluster) {
       clusters.push({
@@ -220,9 +295,11 @@ export function buildStoryClusters(stories: CuratedStory[]): StoryCluster[] {
         title: story.title,
         summary: story.summary,
         publishedAt: story.publishedAt,
+        leadStory: story,
         stories: [story],
         sources: [story.source],
         sourceCount: 1,
+        score: story.score,
       });
       continue;
     }
@@ -233,13 +310,28 @@ export function buildStoryClusters(stories: CuratedStory[]): StoryCluster[] {
   }
 
   return clusters
-    .map((cluster) => ({
-      ...cluster,
-      stories: cluster.stories.sort(
-        (left, right) => new Date(right.publishedAt).getTime() - new Date(left.publishedAt).getTime(),
-      ),
-    }))
+    .map((cluster) => {
+      const rankedStories = [...cluster.stories].sort(compareCuratedStories);
+      const leadStory = rankedStories[0];
+      const clusterScore =
+        leadStory.score + cluster.sourceCount * 3 + Math.min(6, rankedStories.length) * 2;
+
+      return {
+        ...cluster,
+        topic: leadStory.primaryTopic,
+        title: leadStory.title,
+        summary: leadStory.summary,
+        publishedAt: leadStory.publishedAt,
+        leadStory,
+        stories: rankedStories,
+        score: clusterScore,
+      };
+    })
     .sort((left, right) => {
+      if (left.score !== right.score) {
+        return right.score - left.score;
+      }
+
       if (left.stories.length !== right.stories.length) {
         return right.stories.length - left.stories.length;
       }

@@ -18,6 +18,7 @@ import type {
 } from "@/lib/types";
 
 type SelectedTopic = "all" | string;
+const SAVED_TOPICS_STORAGE_KEY = "aggregate.saved-topics.v1";
 
 type ApiResponse = {
   stories: StoryRecord[];
@@ -163,7 +164,7 @@ function StoryCard({ story }: { story: CuratedStory }) {
 }
 
 function ClusterCard({ cluster }: { cluster: StoryCluster }) {
-  const leadStory = cluster.stories[0];
+  const leadStory = cluster.leadStory;
 
   return (
     <article className="rounded-3xl border border-slate-200/80 bg-white/92 p-6 shadow-[0_30px_70px_-45px_rgba(15,23,42,0.5)]">
@@ -238,6 +239,8 @@ export function NewsDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedTopic, setSelectedTopic] = useState<SelectedTopic>("all");
+  const [savedTopics, setSavedTopics] = useState<string[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const loadStories = useCallback(async (options?: { forceRefresh?: boolean; background?: boolean }) => {
     if (!options?.background) {
@@ -295,6 +298,26 @@ export function NewsDashboard() {
     return () => clearInterval(interval);
   }, [loadStories]);
 
+  useEffect(() => {
+    try {
+      const storedValue = window.localStorage.getItem(SAVED_TOPICS_STORAGE_KEY);
+      if (!storedValue) {
+        return;
+      }
+
+      const parsed = JSON.parse(storedValue);
+      if (Array.isArray(parsed)) {
+        setSavedTopics(parsed.filter((entry): entry is string => typeof entry === "string"));
+      }
+    } catch {
+      setSavedTopics([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(SAVED_TOPICS_STORAGE_KEY, JSON.stringify(savedTopics));
+  }, [savedTopics]);
+
   const curatedStories = useMemo(() => curateStories(stories), [stories]);
   const healthSources = useMemo(() => health?.sources ?? [], [health]);
 
@@ -310,14 +333,20 @@ export function NewsDashboard() {
   }, [selectedTopic, topicCounts]);
 
   const filteredStories = useMemo(() => {
-    if (selectedTopic === "all") {
-      return curatedStories;
+    const byTopic =
+      selectedTopic === "all"
+        ? curatedStories
+        : curatedStories.filter((story) =>
+            story.topics.some((topic) => topic.slug === selectedTopic),
+          );
+    const normalizedSearch = searchQuery.trim().toLowerCase();
+
+    if (!normalizedSearch) {
+      return byTopic;
     }
 
-    return curatedStories.filter((story) =>
-      story.topics.some((topic) => topic.slug === selectedTopic),
-    );
-  }, [curatedStories, selectedTopic]);
+    return byTopic.filter((story) => story.searchText.includes(normalizedSearch));
+  }, [curatedStories, searchQuery, selectedTopic]);
 
   const clusters = useMemo(() => buildStoryClusters(filteredStories), [filteredStories]);
   const featuredClusters = useMemo(
@@ -365,6 +394,27 @@ export function NewsDashboard() {
     ],
     [curatedStories.length, topicCounts],
   );
+  const savedTopicOptions = useMemo(
+    () =>
+      topicOptions.filter(
+        (topic) => topic.slug !== "all" && savedTopics.includes(topic.slug),
+      ),
+    [savedTopics, topicOptions],
+  );
+  const selectedTopicLabel =
+    topicOptions.find((topic) => topic.slug === selectedTopic)?.label ?? selectedTopic;
+  const selectedTopicSaved =
+    selectedTopic !== "all" && savedTopics.includes(selectedTopic);
+
+  const toggleSavedTopic = useCallback((slug: string) => {
+    setSavedTopics((current) => {
+      if (current.includes(slug)) {
+        return current.filter((entry) => entry !== slug);
+      }
+
+      return [...current, slug];
+    });
+  }, []);
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_right,rgba(15,118,110,0.18),transparent_44%),radial-gradient(circle_at_top_left,rgba(251,146,60,0.16),transparent_36%),linear-gradient(180deg,#f6fbff_0%,#ecf4fb_100%)]">
@@ -439,27 +489,78 @@ export function NewsDashboard() {
                 Filter the newsroom by the themes actually moving this cycle
               </h2>
             </div>
-            <div className="flex flex-wrap gap-2">
-              {topicOptions.map((topic) => {
-                const active = selectedTopic === topic.slug;
-
-                return (
-                  <button
-                    key={topic.slug}
-                    type="button"
-                    onClick={() => setSelectedTopic(topic.slug)}
-                    className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
-                      active
-                        ? "bg-slate-900 text-white"
-                        : "border border-slate-300 bg-white text-slate-700 hover:border-slate-400"
-                    }`}
-                  >
-                    {topic.label}
-                    <span className="ml-2 text-xs opacity-70">{topic.count}</span>
-                  </button>
-                );
-              })}
+            <div className="flex w-full max-w-md items-center gap-2 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2">
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Search stories, sources, topics"
+                className="w-full bg-transparent text-sm text-slate-900 outline-none placeholder:text-slate-400"
+              />
+              {searchQuery ? (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="rounded-full bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700 transition hover:bg-slate-300"
+                >
+                  Clear
+                </button>
+              ) : null}
             </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            {savedTopicOptions.map((topic) => (
+              <button
+                key={`saved-${topic.slug}`}
+                type="button"
+                onClick={() => setSelectedTopic(topic.slug)}
+                className="rounded-full border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-semibold text-sky-900 transition hover:border-sky-300"
+              >
+                Saved: {topic.label}
+                <span className="ml-2 text-xs opacity-70">{topic.count}</span>
+              </button>
+            ))}
+
+            {selectedTopic !== "all" ? (
+              <button
+                type="button"
+                onClick={() => toggleSavedTopic(selectedTopic)}
+                className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:border-slate-400"
+              >
+                {selectedTopicSaved ? "Unsave topic" : "Save topic"}
+              </button>
+            ) : null}
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            {topicOptions.map((topic) => {
+              const active = selectedTopic === topic.slug;
+              const isSaved = topic.slug !== "all" && savedTopics.includes(topic.slug);
+
+              return (
+                <button
+                  key={topic.slug}
+                  type="button"
+                  onClick={() => setSelectedTopic(topic.slug)}
+                  className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                    active
+                      ? "bg-slate-900 text-white"
+                      : "border border-slate-300 bg-white text-slate-700 hover:border-slate-400"
+                  }`}
+                >
+                  {topic.label}
+                  {isSaved ? <span className="ml-2 text-[11px] opacity-70">saved</span> : null}
+                  <span className="ml-2 text-xs opacity-70">{topic.count}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="mt-3 text-sm text-slate-500">
+            Showing {filteredStories.length} stories
+            {selectedTopic !== "all" ? ` in ${selectedTopicLabel}` : ""}
+            {searchQuery ? ` matching “${searchQuery}”` : ""}
           </div>
         </section>
 

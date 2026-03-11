@@ -81,6 +81,21 @@ export const NEWS_FEED_SOURCES: NewsFeedSource[] = [
     url: "https://www.ft.com/cryptocurrencies?format=rss",
     maxItems: 20,
   },
+  {
+    name: "Ethereum Foundation Blog",
+    url: "https://blog.ethereum.org/feed.xml",
+    maxItems: 18,
+  },
+  {
+    name: "Solana Blog",
+    url: "https://solana.com/rss.xml",
+    maxItems: 18,
+  },
+  {
+    name: "Chainlink Blog",
+    url: "https://blog.chain.link/rss/",
+    maxItems: 18,
+  },
 ];
 
 export const TWITTER_SOURCES: TwitterSource[] = [
