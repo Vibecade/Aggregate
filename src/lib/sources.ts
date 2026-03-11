@@ -15,6 +15,17 @@ export interface FarcasterSource {
   maxItems: number;
 }
 
+export interface RedditSource {
+  subreddit: string;
+  maxItems: number;
+}
+
+export interface BlueskySource {
+  label: string;
+  actor: string;
+  maxItems: number;
+}
+
 export const NEWS_FEED_SOURCES: NewsFeedSource[] = [
   {
     name: "CoinDesk",
@@ -169,6 +180,24 @@ export const FARCASTER_SOURCES: FarcasterSource[] = [
     url: "https://warpcast.com/jessepollak",
     maxItems: 10,
   },
+];
+
+export const REDDIT_SOURCES: RedditSource[] = [
+  { subreddit: "CryptoCurrency", maxItems: 12 },
+  { subreddit: "Bitcoin", maxItems: 10 },
+  { subreddit: "ethereum", maxItems: 10 },
+  { subreddit: "solana", maxItems: 10 },
+  { subreddit: "defi", maxItems: 10 },
+  { subreddit: "ethfinance", maxItems: 10 },
+];
+
+export const BLUESKY_SOURCES: BlueskySource[] = [
+  { label: "Decrypt", actor: "decrypt.co", maxItems: 8 },
+  { label: "CoinDesk", actor: "coindesk.com", maxItems: 8 },
+  { label: "The Block", actor: "theblock.bsky.social", maxItems: 8 },
+  { label: "CoinGecko", actor: "coingecko.com", maxItems: 8 },
+  { label: "Bitcoin", actor: "bitcoin.bsky.social", maxItems: 8 },
+  { label: "Ethereum", actor: "ethereum.bsky.social", maxItems: 8 },
 ];
 
 export const CRYPTO_KEYWORDS = [

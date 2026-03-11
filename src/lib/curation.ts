@@ -122,6 +122,13 @@ const SOURCE_WEIGHTS: Array<{ pattern: RegExp; weight: number }> = [
   { pattern: /^Farcaster vitalik\.eth$/i, weight: 88 },
   { pattern: /^Farcaster jesse\.base\.eth$/i, weight: 83 },
   { pattern: /^Farcaster .*channel$/i, weight: 70 },
+  { pattern: /^Reddit r\/CryptoCurrency$/i, weight: 78 },
+  { pattern: /^Reddit r\/Bitcoin$/i, weight: 80 },
+  { pattern: /^Reddit r\/ethereum$/i, weight: 77 },
+  { pattern: /^Reddit r\/ethfinance$/i, weight: 76 },
+  { pattern: /^Bluesky Decrypt$/i, weight: 76 },
+  { pattern: /^Bluesky CoinDesk$/i, weight: 74 },
+  { pattern: /^Bluesky The Block$/i, weight: 74 },
 ];
 
 function normalizeText(value: string): string {

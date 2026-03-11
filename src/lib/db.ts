@@ -2,7 +2,14 @@ import { get as getBlob, put as putBlob } from "@vercel/blob";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import type { StoryInput, StoryListOptions, StoryRecord, StoryStats, StoryType } from "@/lib/types";
+import {
+  createEmptyStoryCounts,
+  type StoryInput,
+  type StoryListOptions,
+  type StoryRecord,
+  type StoryStats,
+  type StoryType,
+} from "@/lib/types";
 
 type StorageMode = "vercel-blob" | "local-file" | "tmp-file";
 
@@ -105,6 +112,20 @@ function getCanonicalSocialUrl(story: StoryRecord): string | null {
     )
   ) {
     return normalizedUrl.replace("https://warpcast.com/", "https://farcaster.xyz/");
+  }
+
+  if (
+    story.sourceType === "reddit" &&
+    /^https:\/\/www\.reddit\.com\/r\/[a-z0-9_]+\/comments\/[a-z0-9]+/i.test(normalizedUrl)
+  ) {
+    return normalizedUrl;
+  }
+
+  if (
+    story.sourceType === "bluesky" &&
+    /^https:\/\/bsky\.app\/profile\/[a-z0-9.-]+\/post\/[a-z0-9]+$/i.test(normalizedUrl)
+  ) {
+    return normalizedUrl;
   }
 
   return null;
@@ -491,11 +512,7 @@ export async function getStoryCount(type?: StoryType): Promise<number> {
 
 export async function getStoryStats(): Promise<StoryStats> {
   const snapshot = await getSnapshot();
-  const byType: Record<StoryType, number> = {
-    news: 0,
-    twitter: 0,
-    farcaster: 0,
-  };
+  const byType = createEmptyStoryCounts();
 
   for (const story of snapshot.stories) {
     if (!isDisplayableStory(story)) {

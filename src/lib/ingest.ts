@@ -4,15 +4,25 @@ import Parser from "rss-parser";
 
 import { pruneStories, upsertStories } from "@/lib/db";
 import {
+  BLUESKY_SOURCES,
   CRYPTO_KEYWORDS,
   FARCASTER_SOURCES,
   NEWS_FEED_SOURCES,
+  REDDIT_SOURCES,
   TWITTER_SOURCES,
+  type BlueskySource,
   type FarcasterSource,
   type NewsFeedSource,
+  type RedditSource,
   type TwitterSource,
 } from "@/lib/sources";
-import type { RefreshResult, SourceRefreshStatus, StoryInput, StoryType } from "@/lib/types";
+import {
+  createEmptyStoryCounts,
+  type RefreshResult,
+  type SourceRefreshStatus,
+  type StoryInput,
+  type StoryType,
+} from "@/lib/types";
 
 const REQUEST_TIMEOUT_MS = 18000;
 const DEFAULT_MAX_ROWS = 4000;
@@ -61,8 +71,68 @@ interface FarcasterSnippetCandidate {
   fallbackUrl: string;
 }
 
+interface NeynarChannelFeedResponse {
+  casts?: NeynarCast[];
+}
+
+interface NeynarCast {
+  hash?: string;
+  text?: string;
+  timestamp?: string;
+  author?: {
+    username?: string;
+  };
+}
+
+interface RedditTokenResponse {
+  access_token?: string;
+  expires_in?: number;
+}
+
+interface RedditListingResponse {
+  data?: {
+    children?: Array<{
+      data?: RedditPost;
+    }>;
+  };
+}
+
+interface RedditPost {
+  id?: string;
+  title?: string;
+  selftext?: string;
+  permalink?: string;
+  created_utc?: number;
+  author?: string;
+  subreddit?: string;
+}
+
+interface BlueskyAuthorFeedResponse {
+  feed?: Array<{
+    post?: BlueskyPost;
+  }>;
+}
+
+interface BlueskyPost {
+  uri?: string;
+  indexedAt?: string;
+  author?: {
+    handle?: string;
+  };
+  record?: {
+    text?: string;
+    createdAt?: string;
+  };
+}
+
 const farcasterProfileCache = new Map<string, Promise<FarcasterProfile | null>>();
 const farcasterCastCache = new Map<string, Promise<FarcasterCast[]>>();
+let redditAccessTokenCache:
+  | {
+      token: string;
+      expiresAt: number;
+    }
+  | null = null;
 
 function normalizeText(value: string): string {
   return value
@@ -154,6 +224,77 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     }
 
     return (await response.json()) as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function hasNeynarApiKey(): boolean {
+  return Boolean(process.env.NEYNAR_API_KEY?.trim());
+}
+
+function getRedditCredentials():
+  | {
+      clientId: string;
+      clientSecret: string;
+    }
+  | null {
+  const clientId = process.env.REDDIT_CLIENT_ID?.trim();
+  const clientSecret = process.env.REDDIT_CLIENT_SECRET?.trim();
+
+  if (!clientId || !clientSecret) {
+    return null;
+  }
+
+  return { clientId, clientSecret };
+}
+
+async function getRedditAccessToken(): Promise<string> {
+  const credentials = getRedditCredentials();
+  if (!credentials) {
+    throw new Error("Missing Reddit API credentials");
+  }
+
+  if (redditAccessTokenCache && Date.now() < redditAccessTokenCache.expiresAt) {
+    return redditAccessTokenCache.token;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch("https://www.reddit.com/api/v1/access_token", {
+      method: "POST",
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Basic ${Buffer.from(
+          `${credentials.clientId}:${credentials.clientSecret}`,
+        ).toString("base64")}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "AggregateBot/1.0 (+https://localhost)",
+      },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const payload = (await response.json()) as RedditTokenResponse;
+    if (!payload.access_token) {
+      throw new Error("Missing Reddit access token");
+    }
+
+    const expiresInMs = Math.max(60, Number(payload.expires_in ?? 3600) - 120) * 1000;
+    redditAccessTokenCache = {
+      token: payload.access_token,
+      expiresAt: Date.now() + expiresInMs,
+    };
+
+    return payload.access_token;
   } finally {
     clearTimeout(timeout);
   }
@@ -297,6 +438,11 @@ function extractFarcasterUsernameFromUrl(url: string): string | null {
   return match?.[1]?.toLowerCase() ?? null;
 }
 
+function extractFarcasterChannelIdFromUrl(url: string): string | null {
+  const match = url.match(/^https:\/\/warpcast\.com\/~\/channel\/([A-Za-z0-9_-]+)$/i);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
 function extractFarcasterChannelCandidates(
   markdown: string,
   sourceUrl: string,
@@ -347,6 +493,19 @@ function getFarcasterCastHashPrefix(hash: string): string {
 
 function buildFarcasterCastUrl(username: string, hash: string): string {
   return `https://farcaster.xyz/${username.toLowerCase()}/${getFarcasterCastHashPrefix(hash)}`;
+}
+
+function normalizeRedditPermalink(permalink: string): string {
+  return `https://www.reddit.com${permalink.startsWith("/") ? permalink : `/${permalink}`}`;
+}
+
+function buildBlueskyPostUrl(handle: string, uri: string): string | null {
+  const match = uri.match(/\/app\.bsky\.feed\.post\/([^/]+)$/);
+  if (!match) {
+    return null;
+  }
+
+  return `https://bsky.app/profile/${handle.toLowerCase()}/post/${match[1]}`;
 }
 
 function normalizeComparableText(value: string): string {
@@ -448,7 +607,13 @@ function dedupeKeyForStory(story: StoryInput): string {
     return `${story.sourceType}|${normalizedUrl}`;
   }
 
-  if (/\/status\/\d+$/i.test(normalizedUrl) || /\/casts\//i.test(normalizedUrl) || /\/0x[0-9a-f]+$/i.test(normalizedUrl)) {
+  if (
+    /\/status\/\d+$/i.test(normalizedUrl) ||
+    /\/casts\//i.test(normalizedUrl) ||
+    /\/0x[0-9a-f]+$/i.test(normalizedUrl) ||
+    /\/comments\/[a-z0-9]+/i.test(normalizedUrl) ||
+    /\/profile\/[^/]+\/post\/[^/]+$/i.test(normalizedUrl)
+  ) {
     return `${story.sourceType}|${normalizedUrl}`;
   }
 
@@ -585,7 +750,193 @@ async function fetchTwitterStories(source: TwitterSource): Promise<StoryInput[]>
   });
 }
 
+async function fetchNeynarChannelStories(source: FarcasterSource): Promise<StoryInput[]> {
+  const channelId = extractFarcasterChannelIdFromUrl(source.url);
+  const apiKey = process.env.NEYNAR_API_KEY?.trim();
+
+  if (!channelId || !apiKey) {
+    return [];
+  }
+
+  const data = await fetchJson<NeynarChannelFeedResponse>(
+    `https://api.neynar.com/v2/farcaster/feed/channels?channel_ids=${encodeURIComponent(
+      channelId,
+    )}&limit=${Math.max(source.maxItems * 2, 10)}&with_recasts=false&with_replies=false`,
+    {
+      headers: {
+        "x-api-key": apiKey,
+      },
+    },
+  );
+
+  const stories: StoryInput[] = [];
+  const seenUrls = new Set<string>();
+
+  for (const cast of data.casts ?? []) {
+    const text = normalizeSocialText(String(cast.text ?? ""));
+    const username = cast.author?.username?.trim().toLowerCase();
+    const hash = cast.hash?.trim();
+    const timestamp = cast.timestamp?.trim();
+
+    if (!timestamp) {
+      continue;
+    }
+
+    const publishedAt = ensureIsoDate(timestamp);
+
+    if (!text || !username || !hash || !cryptoRelevant(text) || !isRecentEnoughForSocial(publishedAt)) {
+      continue;
+    }
+
+    const url = buildFarcasterCastUrl(username, hash);
+    if (seenUrls.has(url)) {
+      continue;
+    }
+
+    seenUrls.add(url);
+    stories.push({
+      uid: hashValue(`farcaster|${source.label}|${url}|${text}`),
+      title: shorten(text, 140),
+      url,
+      source: `Farcaster ${source.label}`,
+      sourceType: "farcaster",
+      publishedAt,
+      summary: shorten(text, 260),
+      author: username,
+    });
+
+    if (stories.length >= source.maxItems) {
+      break;
+    }
+  }
+
+  return stories;
+}
+
+async function fetchRedditStories(source: RedditSource): Promise<StoryInput[]> {
+  const token = await getRedditAccessToken();
+  const data = await fetchJson<RedditListingResponse>(
+    `https://oauth.reddit.com/r/${encodeURIComponent(source.subreddit)}/new.json?limit=${Math.max(
+      source.maxItems * 2,
+      10,
+    )}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    },
+  );
+
+  const stories: StoryInput[] = [];
+
+  for (const child of data.data?.children ?? []) {
+    const post = child.data;
+    const title = normalizeSocialText(String(post?.title ?? ""));
+    const summaryText = normalizeSocialText(String(post?.selftext ?? ""));
+    const permalink = String(post?.permalink ?? "");
+    const subreddit = String(post?.subreddit ?? source.subreddit);
+    const author = normalizeText(String(post?.author ?? ""));
+
+    if (!title || !permalink) {
+      continue;
+    }
+
+    const combinedText = `${title} ${summaryText}`.trim();
+    if (!cryptoRelevant(combinedText)) {
+      continue;
+    }
+
+    const createdAtSeconds = Number(post?.created_utc ?? 0);
+    if (!Number.isFinite(createdAtSeconds) || createdAtSeconds <= 0) {
+      continue;
+    }
+
+    const publishedAt = ensureIsoDate(new Date(createdAtSeconds * 1000).toISOString());
+
+    if (!isRecentEnoughForSocial(publishedAt)) {
+      continue;
+    }
+
+    const url = normalizeRedditPermalink(permalink);
+    stories.push({
+      uid: hashValue(`reddit|${subreddit}|${url}|${title}`),
+      title: shorten(title, 140),
+      url,
+      source: `Reddit r/${subreddit}`,
+      sourceType: "reddit",
+      publishedAt,
+      summary: summaryText ? shorten(summaryText, 260) : undefined,
+      author: author || undefined,
+    });
+
+    if (stories.length >= source.maxItems) {
+      break;
+    }
+  }
+
+  return stories;
+}
+
+async function fetchBlueskyStories(source: BlueskySource): Promise<StoryInput[]> {
+  const data = await fetchJson<BlueskyAuthorFeedResponse>(
+    `https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(
+      source.actor,
+    )}&limit=${Math.max(source.maxItems * 3, 12)}`,
+  );
+
+  const stories: StoryInput[] = [];
+  const seenUrls = new Set<string>();
+  const normalizedActor = source.actor.trim().toLowerCase();
+
+  for (const entry of data.feed ?? []) {
+    const post = entry.post;
+    const handle = post?.author?.handle?.trim().toLowerCase();
+    const text = normalizeSocialText(String(post?.record?.text ?? ""));
+    const url = handle && post?.uri ? buildBlueskyPostUrl(handle, post.uri) : null;
+
+    if (!handle || handle !== normalizedActor || !text || !url || !cryptoRelevant(text)) {
+      continue;
+    }
+
+    const rawPublishedAt = post?.indexedAt ?? post?.record?.createdAt;
+    if (!rawPublishedAt) {
+      continue;
+    }
+
+    const publishedAt = ensureIsoDate(rawPublishedAt);
+    if (!isRecentEnoughForSocial(publishedAt) || seenUrls.has(url)) {
+      continue;
+    }
+
+    seenUrls.add(url);
+    stories.push({
+      uid: hashValue(`bluesky|${source.actor}|${url}|${text}`),
+      title: shorten(text, 140),
+      url,
+      source: `Bluesky ${source.label}`,
+      sourceType: "bluesky",
+      publishedAt,
+      summary: shorten(text, 260),
+      author: handle,
+    });
+
+    if (stories.length >= source.maxItems) {
+      break;
+    }
+  }
+
+  return stories;
+}
+
 async function fetchFarcasterStories(source: FarcasterSource): Promise<StoryInput[]> {
+  const channelId = extractFarcasterChannelIdFromUrl(source.url);
+  if (channelId && hasNeynarApiKey()) {
+    const channelStories = await fetchNeynarChannelStories(source);
+    if (channelStories.length > 0) {
+      return channelStories;
+    }
+  }
+
   const sourceUsername = extractFarcasterUsernameFromUrl(source.url);
 
   if (sourceUsername) {
@@ -697,6 +1048,7 @@ async function fetchFarcasterStories(source: FarcasterSource): Promise<StoryInpu
 }
 
 export async function ingestAllSources(): Promise<RefreshResult> {
+  const redditEnabled = Boolean(getRedditCredentials());
   const jobs: Array<{
     label: string;
     type: StoryType;
@@ -717,6 +1069,18 @@ export async function ingestAllSources(): Promise<RefreshResult> {
       type: "farcaster" as const,
       run: () => fetchFarcasterStories(source),
     })),
+    ...BLUESKY_SOURCES.map((source) => ({
+      label: `Bluesky ${source.label}`,
+      type: "bluesky" as const,
+      run: () => fetchBlueskyStories(source),
+    })),
+    ...(!redditEnabled
+      ? []
+      : REDDIT_SOURCES.map((source) => ({
+          label: `Reddit r/${source.subreddit}`,
+          type: "reddit" as const,
+          run: () => fetchRedditStories(source),
+        }))),
   ];
 
   const errors: string[] = [];
@@ -758,11 +1122,7 @@ export async function ingestAllSources(): Promise<RefreshResult> {
   const maxRows = Number(process.env.MAX_STORY_ROWS ?? DEFAULT_MAX_ROWS);
   await pruneStories(Number.isFinite(maxRows) ? maxRows : DEFAULT_MAX_ROWS);
 
-  const byType: Record<StoryType, number> = {
-    news: 0,
-    twitter: 0,
-    farcaster: 0,
-  };
+  const byType = createEmptyStoryCounts();
 
   for (const story of dedupedStories) {
     byType[story.sourceType] += 1;

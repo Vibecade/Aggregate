@@ -1,6 +1,6 @@
 import { getStorageInfo, getStoryCount, getSyncValue, setSyncValue } from "@/lib/db";
 import { ingestAllSources } from "@/lib/ingest";
-import type { RefreshResult } from "@/lib/types";
+import { createEmptyStoryCounts, isStoryType, type RefreshResult } from "@/lib/types";
 
 const DEFAULT_CACHE_TTL_MINUTES = 15;
 const LAST_REFRESH_REPORT_KEY = "last_refresh_report";
@@ -107,15 +107,18 @@ export async function getLastRefreshReport(): Promise<RefreshResult | null> {
       return null;
     }
 
+    const byType = createEmptyStoryCounts();
+    for (const type of Object.keys(byType)) {
+      byType[type as keyof typeof byType] = Number(
+        parsed.byType[type as keyof typeof parsed.byType] ?? 0,
+      );
+    }
+
     return {
       processed: parsed.processed,
       inserted: parsed.inserted,
       updatedAt: parsed.updatedAt,
-      byType: {
-        news: Number(parsed.byType.news ?? 0),
-        twitter: Number(parsed.byType.twitter ?? 0),
-        farcaster: Number(parsed.byType.farcaster ?? 0),
-      },
+      byType,
       errors: Array.isArray(parsed.errors) ? parsed.errors.filter((error): error is string => typeof error === "string") : [],
       sources: Array.isArray(parsed.sources)
         ? parsed.sources.filter(
@@ -125,6 +128,7 @@ export async function getLastRefreshReport(): Promise<RefreshResult | null> {
                   typeof source === "object" &&
                   typeof source.label === "string" &&
                   typeof source.type === "string" &&
+                  isStoryType(source.type) &&
                   typeof source.status === "string" &&
                   typeof source.storyCount === "number" &&
                   typeof source.durationMs === "number",

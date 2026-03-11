@@ -1,5 +1,20 @@
-export type StoryType = "news" | "twitter" | "farcaster";
+export const STORY_TYPES = ["news", "twitter", "farcaster", "reddit", "bluesky"] as const;
+export type StoryType = (typeof STORY_TYPES)[number];
 export type SourceHealthStatus = "healthy" | "quiet" | "error";
+
+export function isStoryType(value: string): value is StoryType {
+  return STORY_TYPES.includes(value as StoryType);
+}
+
+export function createEmptyStoryCounts(): Record<StoryType, number> {
+  return {
+    news: 0,
+    twitter: 0,
+    farcaster: 0,
+    reddit: 0,
+    bluesky: 0,
+  };
+}
 
 export interface StoryInput {
   uid: string;

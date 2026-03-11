@@ -17,6 +17,7 @@ import type {
   StoryStats,
   StoryType,
 } from "@/lib/types";
+import { createEmptyStoryCounts, isStoryType } from "@/lib/types";
 
 type SelectedTopic = "all" | string;
 type DashboardTheme = "light" | "dark";
@@ -120,6 +121,14 @@ function sourceTypeLabel(type: StoryType): string {
 
   if (type === "farcaster") {
     return "Farcaster";
+  }
+
+  if (type === "reddit") {
+    return "Reddit";
+  }
+
+  if (type === "bluesky") {
+    return "Bluesky";
   }
 
   return "News";
@@ -369,7 +378,7 @@ export function NewsDashboard() {
   const [stories, setStories] = useState<StoryRecord[]>([]);
   const [stats, setStats] = useState<StoryStats>({
     total: 0,
-    byType: { news: 0, twitter: 0, farcaster: 0 },
+    byType: createEmptyStoryCounts(),
   });
   const [health, setHealth] = useState<RefreshResult | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -413,7 +422,7 @@ export function NewsDashboard() {
       const payload = (await response.json()) as ApiResponse;
 
       setStories(payload.stories ?? []);
-      setStats(payload.stats ?? { total: 0, byType: { news: 0, twitter: 0, farcaster: 0 } });
+      setStats(payload.stats ?? { total: 0, byType: createEmptyStoryCounts() });
       setHealth(payload.health ?? null);
       setLastSyncedAt(payload.meta?.lastSyncedAt ?? null);
       setIsRefreshing(Boolean(payload.meta?.isRefreshing));
@@ -466,12 +475,7 @@ export function NewsDashboard() {
       }
 
       const storedSourceFilter = window.localStorage.getItem(SOURCE_FILTER_STORAGE_KEY);
-      if (
-        storedSourceFilter === "all" ||
-        storedSourceFilter === "news" ||
-        storedSourceFilter === "twitter" ||
-        storedSourceFilter === "farcaster"
-      ) {
+      if (storedSourceFilter === "all" || (storedSourceFilter && isStoryType(storedSourceFilter))) {
         setSelectedSourceType(storedSourceFilter);
       }
     } catch {
@@ -530,6 +534,8 @@ export function NewsDashboard() {
       news: topicAndSearchStories.filter((story) => story.sourceType === "news").length,
       twitter: topicAndSearchStories.filter((story) => story.sourceType === "twitter").length,
       farcaster: topicAndSearchStories.filter((story) => story.sourceType === "farcaster").length,
+      reddit: topicAndSearchStories.filter((story) => story.sourceType === "reddit").length,
+      bluesky: topicAndSearchStories.filter((story) => story.sourceType === "bluesky").length,
     }),
     [topicAndSearchStories],
   );
@@ -561,7 +567,11 @@ export function NewsDashboard() {
   const visibleTwitterCount = filteredStories.filter((story) => story.sourceType === "twitter").length;
   const visibleFarcasterCount =
     filteredStories.filter((story) => story.sourceType === "farcaster").length;
-  const visibleSocialCount = visibleTwitterCount + visibleFarcasterCount;
+  const visibleRedditCount = filteredStories.filter((story) => story.sourceType === "reddit").length;
+  const visibleBlueskyCount =
+    filteredStories.filter((story) => story.sourceType === "bluesky").length;
+  const visibleSocialCount =
+    visibleTwitterCount + visibleFarcasterCount + visibleRedditCount + visibleBlueskyCount;
 
   const healthySourceCount = healthSources.filter((source) => source.status === "healthy").length;
   const degradedSourceCount = healthSources.filter((source) => source.status === "error").length;
@@ -603,6 +613,8 @@ export function NewsDashboard() {
       { slug: "news" as const, label: "News", count: sourceCounts.news },
       { slug: "twitter" as const, label: "X", count: sourceCounts.twitter },
       { slug: "farcaster" as const, label: "Farcaster", count: sourceCounts.farcaster },
+      { slug: "reddit" as const, label: "Reddit", count: sourceCounts.reddit },
+      { slug: "bluesky" as const, label: "Bluesky", count: sourceCounts.bluesky },
     ],
     [sourceCounts],
   );
@@ -745,7 +757,11 @@ export function NewsDashboard() {
               {visibleSocialCount}
             </p>
             <p className={classes("mt-1 text-sm", isDark ? "text-slate-500" : "text-slate-500")}>
-              {stats.byType.twitter + stats.byType.farcaster} cached total
+              {stats.byType.twitter +
+                stats.byType.farcaster +
+                stats.byType.reddit +
+                stats.byType.bluesky}{" "}
+              cached total
             </p>
           </div>
           <div

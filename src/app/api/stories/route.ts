@@ -7,13 +7,13 @@ import {
   refreshStories,
 } from "@/lib/cache";
 import { getStoryStats, listStories } from "@/lib/db";
-import type { StoryType } from "@/lib/types";
+import { isStoryType, type StoryType } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 function parseType(value: string | null): StoryType | undefined {
-  if (value === "news" || value === "twitter" || value === "farcaster") {
+  if (value && isStoryType(value)) {
     return value;
   }
 
