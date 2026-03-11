@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { ensureFreshStories, getCacheMeta, refreshStories } from "@/lib/cache";
+import {
+  ensureFreshStories,
+  getCacheMeta,
+  getLastRefreshReport,
+  refreshStories,
+} from "@/lib/cache";
 import { getStoryStats, listStories } from "@/lib/db";
 import type { StoryType } from "@/lib/types";
 
@@ -41,16 +46,18 @@ export async function GET(request: NextRequest) {
       await ensureFreshStories();
     }
 
-    const [stories, stats, meta] = await Promise.all([
+    const [stories, stats, meta, report] = await Promise.all([
       listStories({ limit, type }),
       getStoryStats(),
       getCacheMeta(),
+      getLastRefreshReport(),
     ]);
 
     return NextResponse.json({
       stories,
       stats,
       meta,
+      health: report,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Feed unavailable";

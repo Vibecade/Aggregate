@@ -3,6 +3,7 @@ import { ingestAllSources } from "@/lib/ingest";
 import type { RefreshResult } from "@/lib/types";
 
 const DEFAULT_CACHE_TTL_MINUTES = 15;
+const LAST_REFRESH_REPORT_KEY = "last_refresh_report";
 
 let activeRefreshPromise: Promise<RefreshResult> | null = null;
 
@@ -47,6 +48,7 @@ export async function refreshStories(): Promise<RefreshResult> {
 
     const result = await ingestAllSources();
     await setSyncValue("last_success_sync", result.updatedAt);
+    await setSyncValue(LAST_REFRESH_REPORT_KEY, JSON.stringify(result));
 
     return result;
   })();
@@ -82,4 +84,55 @@ export async function getCacheMeta() {
     isRefreshing: isRefreshing(),
     storage: getStorageInfo(),
   };
+}
+
+export async function getLastRefreshReport(): Promise<RefreshResult | null> {
+  const rawValue = await getSyncValue(LAST_REFRESH_REPORT_KEY);
+  if (!rawValue) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue) as Partial<RefreshResult>;
+
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      typeof parsed.updatedAt !== "string" ||
+      typeof parsed.processed !== "number" ||
+      typeof parsed.inserted !== "number" ||
+      !parsed.byType ||
+      typeof parsed.byType !== "object"
+    ) {
+      return null;
+    }
+
+    return {
+      processed: parsed.processed,
+      inserted: parsed.inserted,
+      updatedAt: parsed.updatedAt,
+      byType: {
+        news: Number(parsed.byType.news ?? 0),
+        twitter: Number(parsed.byType.twitter ?? 0),
+        farcaster: Number(parsed.byType.farcaster ?? 0),
+      },
+      errors: Array.isArray(parsed.errors) ? parsed.errors.filter((error): error is string => typeof error === "string") : [],
+      sources: Array.isArray(parsed.sources)
+        ? parsed.sources.filter(
+            (source): source is RefreshResult["sources"][number] =>
+              Boolean(
+                source &&
+                  typeof source === "object" &&
+                  typeof source.label === "string" &&
+                  typeof source.type === "string" &&
+                  typeof source.status === "string" &&
+                  typeof source.storyCount === "number" &&
+                  typeof source.durationMs === "number",
+              ),
+          )
+        : [],
+    };
+  } catch {
+    return null;
+  }
 }

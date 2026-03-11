@@ -1,4 +1,5 @@
 export type StoryType = "news" | "twitter" | "farcaster";
+export type SourceHealthStatus = "healthy" | "quiet" | "error";
 
 export interface StoryInput {
   uid: string;
@@ -27,9 +28,19 @@ export interface RefreshResult {
   updatedAt: string;
   byType: Record<StoryType, number>;
   errors: string[];
+  sources: SourceRefreshStatus[];
 }
 
 export interface StoryStats {
   total: number;
   byType: Record<StoryType, number>;
+}
+
+export interface SourceRefreshStatus {
+  label: string;
+  type: StoryType;
+  status: SourceHealthStatus;
+  storyCount: number;
+  durationMs: number;
+  message?: string;
 }

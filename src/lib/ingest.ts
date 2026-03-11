@@ -12,7 +12,7 @@ import {
   type NewsFeedSource,
   type TwitterSource,
 } from "@/lib/sources";
-import type { RefreshResult, StoryInput, StoryType } from "@/lib/types";
+import type { RefreshResult, SourceRefreshStatus, StoryInput, StoryType } from "@/lib/types";
 
 const REQUEST_TIMEOUT_MS = 18000;
 const DEFAULT_MAX_ROWS = 4000;
@@ -721,15 +721,33 @@ export async function ingestAllSources(): Promise<RefreshResult> {
 
   const errors: string[] = [];
   const collected: StoryInput[] = [];
+  const sourceStatuses: SourceRefreshStatus[] = [];
 
   await Promise.all(
     jobs.map(async (job) => {
+      const startedAt = Date.now();
+
       try {
         const stories = await job.run();
         collected.push(...stories);
+        sourceStatuses.push({
+          label: job.label,
+          type: job.type,
+          status: stories.length > 0 ? "healthy" : "quiet",
+          storyCount: stories.length,
+          durationMs: Date.now() - startedAt,
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         errors.push(`${job.label}: ${message}`);
+        sourceStatuses.push({
+          label: job.label,
+          type: job.type,
+          status: "error",
+          storyCount: 0,
+          durationMs: Date.now() - startedAt,
+          message,
+        });
       }
     }),
   );
@@ -756,5 +774,6 @@ export async function ingestAllSources(): Promise<RefreshResult> {
     updatedAt: new Date().toISOString(),
     byType,
     errors,
+    sources: sourceStatuses.sort((left, right) => left.label.localeCompare(right.label)),
   };
 }
