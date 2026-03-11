@@ -99,15 +99,23 @@ export const NEWS_FEED_SOURCES: NewsFeedSource[] = [
 ];
 
 export const TWITTER_SOURCES: TwitterSource[] = [
-  { handle: "VitalikButerin", maxItems: 10 },
-  { handle: "WuBlockchain", maxItems: 10 },
-  { handle: "coinbase", maxItems: 10 },
-  { handle: "BanklessHQ", maxItems: 10 },
-  { handle: "CoinDesk", maxItems: 10 },
-  { handle: "Cointelegraph", maxItems: 10 },
-  { handle: "brian_armstrong", maxItems: 10 },
-  { handle: "lookonchain", maxItems: 10 },
-  { handle: "solana", maxItems: 10 },
+  { handle: "VitalikButerin", maxItems: 12 },
+  { handle: "WuBlockchain", maxItems: 12 },
+  { handle: "coinbase", maxItems: 12 },
+  { handle: "BanklessHQ", maxItems: 12 },
+  { handle: "CoinDesk", maxItems: 12 },
+  { handle: "Cointelegraph", maxItems: 12 },
+  { handle: "brian_armstrong", maxItems: 12 },
+  { handle: "lookonchain", maxItems: 12 },
+  { handle: "solana", maxItems: 12 },
+  { handle: "DefiLlama", maxItems: 12 },
+  { handle: "TheBlock__", maxItems: 10 },
+  { handle: "blockworks_", maxItems: 10 },
+  { handle: "BitcoinMagazine", maxItems: 10 },
+  { handle: "MessariCrypto", maxItems: 10 },
+  { handle: "glassnode", maxItems: 10 },
+  { handle: "jseyff", maxItems: 10 },
+  { handle: "EricBalchunas", maxItems: 10 },
 ];
 
 export const FARCASTER_SOURCES: FarcasterSource[] = [

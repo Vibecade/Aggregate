@@ -167,20 +167,20 @@ function StoryCard({
       className={classes(
         "rounded-2xl border p-5 shadow-[0_20px_50px_-40px_rgba(15,23,42,0.45)] ring-1 transition hover:-translate-y-0.5",
         isDark
-          ? "border-slate-800/90 bg-slate-950/80 ring-white/5 hover:border-sky-500/60"
+          ? "border-slate-700/80 bg-slate-900/90 text-slate-100 ring-white/10 hover:border-sky-400/70"
           : "border-slate-200/80 bg-white/90 ring-white/40 hover:border-sky-300",
       )}
     >
       <div
         className={classes(
           "flex items-start justify-between gap-3 text-xs uppercase tracking-[0.12em]",
-          isDark ? "text-slate-400" : "text-slate-500",
+          isDark ? "text-slate-300" : "text-slate-500",
         )}
       >
         <span
           className={classes(
             "rounded-full px-2 py-1 font-semibold",
-            isDark ? "bg-slate-800 text-slate-100" : "bg-slate-100 text-slate-700",
+            isDark ? "bg-slate-800/95 text-slate-50" : "bg-slate-100 text-slate-700",
           )}
         >
           {storyLaneLabel(story)}
@@ -191,8 +191,9 @@ function StoryCard({
       <a
         className={classes(
           "mt-3 block text-lg font-semibold leading-tight transition",
-          isDark ? "text-slate-50 hover:text-sky-300" : "text-slate-900 hover:text-sky-700",
+          isDark ? "!text-white hover:!text-sky-300" : "text-slate-900 hover:text-sky-700",
         )}
+        style={isDark ? { color: "#ffffff" } : undefined}
         href={story.url}
         target="_blank"
         rel="noopener noreferrer"
@@ -203,7 +204,7 @@ function StoryCard({
       <p
         className={classes(
           "mt-3 text-sm leading-relaxed",
-          isDark ? "text-slate-300" : "text-slate-600",
+          isDark ? "text-slate-100/85" : "text-slate-600",
         )}
       >
         {story.summary ?? "Open the source for full context."}
@@ -223,14 +224,14 @@ function StoryCard({
       <div
         className={classes(
           "mt-4 flex items-center justify-between gap-3 border-t pt-3 text-xs",
-          isDark ? "border-slate-800 text-slate-400" : "border-slate-100 text-slate-500",
+          isDark ? "border-slate-800/90 text-slate-300" : "border-slate-100 text-slate-500",
         )}
       >
         <span className="truncate" title={story.source}>
           {story.source}
         </span>
         {story.author ? (
-          <span className={classes("font-semibold", isDark ? "text-slate-300" : "text-slate-500")}>
+          <span className={classes("font-semibold", isDark ? "text-slate-200" : "text-slate-500")}>
             {story.author}
           </span>
         ) : null}
@@ -252,13 +253,13 @@ function ClusterCard({
     <article
       className={classes(
         "rounded-3xl border p-6 shadow-[0_30px_70px_-45px_rgba(15,23,42,0.5)]",
-        isDark ? "border-slate-800/90 bg-slate-950/80" : "border-slate-200/80 bg-white/92",
+        isDark ? "border-slate-700/80 bg-slate-900/90 text-slate-100" : "border-slate-200/80 bg-white/92",
       )}
     >
       <div
         className={classes(
           "flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.14em]",
-          isDark ? "text-slate-400" : "text-slate-500",
+          isDark ? "text-slate-300" : "text-slate-500",
         )}
       >
         <span
@@ -285,8 +286,9 @@ function ClusterCard({
         rel="noopener noreferrer"
         className={classes(
           "mt-4 block text-2xl font-semibold leading-tight transition",
-          isDark ? "text-slate-50 hover:text-sky-300" : "text-slate-900 hover:text-sky-700",
+          isDark ? "!text-white hover:!text-sky-300" : "text-slate-900 hover:text-sky-700",
         )}
+        style={isDark ? { color: "#ffffff" } : undefined}
       >
         {cluster.title}
       </a>
@@ -294,7 +296,7 @@ function ClusterCard({
       <p
         className={classes(
           "mt-3 max-w-3xl text-sm leading-relaxed",
-          isDark ? "text-slate-300" : "text-slate-600",
+          isDark ? "text-slate-100/85" : "text-slate-600",
         )}
       >
         {cluster.summary ?? "Open the lead story for the full thread of coverage."}
@@ -303,7 +305,7 @@ function ClusterCard({
       <div
         className={classes(
           "mt-5 flex flex-wrap items-center gap-3 text-sm",
-          isDark ? "text-slate-400" : "text-slate-500",
+          isDark ? "text-slate-300" : "text-slate-500",
         )}
       >
         <span>{cluster.sourceCount} sources</span>
@@ -638,7 +640,7 @@ export function NewsDashboard() {
       className={classes(
         "min-h-screen",
         isDark
-          ? "bg-[radial-gradient(circle_at_top_right,rgba(14,165,233,0.12),transparent_34%),radial-gradient(circle_at_top_left,rgba(249,115,22,0.12),transparent_32%),linear-gradient(180deg,#020617_0%,#0f172a_100%)]"
+          ? "bg-[radial-gradient(circle_at_top_right,rgba(14,165,233,0.12),transparent_34%),radial-gradient(circle_at_top_left,rgba(249,115,22,0.12),transparent_32%),linear-gradient(180deg,#020617_0%,#0f172a_100%)] text-slate-100"
           : "bg-[radial-gradient(circle_at_top_right,rgba(15,118,110,0.18),transparent_44%),radial-gradient(circle_at_top_left,rgba(251,146,60,0.16),transparent_36%),linear-gradient(180deg,#f6fbff_0%,#ecf4fb_100%)]",
       )}
     >
